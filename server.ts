@@ -30,10 +30,10 @@ async function startServer() {
       }
 
       const ai = new GoogleGenAI({ apiKey });
-      const model = ai.models.get(modelName || "gemini-3.1-pro-preview");
 
       const contents = videoData ? { parts: [videoData, { text: prompt }] } : prompt;
-      const result = await model.generateContent({
+      const result = await ai.models.generateContent({
+        model: modelName || "gemini-3.1-pro-preview",
         contents: contents,
         config: {
           responseMimeType: "application/json",
