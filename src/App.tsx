@@ -45,8 +45,8 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-// Firebase imports
-import { auth, db, storage } from './firebase';
+// Firebase imports removed - now using Cloud Run Backend API
+// import { auth, db, storage } from './firebase';
 import { 
   signInWithPopup, 
   GoogleAuthProvider, 
@@ -219,7 +219,7 @@ const SortableStepItem: React.FC<SortableStepItemProps> = ({
 
 export default function App() {
   const [view, setView] = useState<'student' | 'teacher' | 'history'>('student');
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<{uid: string, displayName: string, role: 'student' | 'teacher', isGuest?: boolean} | null>(null);
   const [userRole, setUserRole] = useState<'student' | 'teacher' | null>(null);
   const [isTeacherLoggedIn, setIsTeacherLoggedIn] = useState(false);
   const [loginUsername, setLoginUsername] = useState('');
@@ -242,96 +242,82 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Auth Listener
+  // Auth Listener - Replaced with simple local state for Cloud Run
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
-        // Fetch user role from Firestore
-        const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
-        if (userDoc.exists()) {
-          setUserRole(userDoc.data().role);
-        } else {
-          // Default to student if not exists
-          const defaultRole = currentUser.email === 'chinlu0322@gmail.com' ? 'teacher' : 'student';
-          await setDoc(doc(db, 'users', currentUser.uid), {
-            uid: currentUser.uid,
-            email: currentUser.email,
-            displayName: currentUser.displayName,
-            role: defaultRole,
-            createdAt: serverTimestamp()
-          });
-          setUserRole(defaultRole);
+    // Check if there's a saved session in localStorage
+    const savedUser = localStorage.getItem('app_user');
+    if (savedUser) {
+      const parsedUser = JSON.parse(savedUser);
+      setUser(parsedUser);
+      setUserRole(parsedUser.role);
+    }
+  }, []);
+
+  // Sync steps from Backend
+  useEffect(() => {
+    const fetchSteps = async () => {
+      try {
+        const res = await fetch('/api/health'); // Just checking connection
+        // In a real app, we'd have a /api/config endpoint
+      } catch (err) {
+        console.error("Backend connection failed:", err);
+      }
+    };
+    fetchSteps();
+  }, []);
+
+  // Fetch submissions from Backend
+  useEffect(() => {
+    const fetchSubmissions = async () => {
+      try {
+        const res = await fetch('/api/submissions');
+        const data = await res.json();
+        if (userRole === 'teacher') {
+          setSubmissions(data);
+        } else if (user) {
+          setSubmissions(data.filter((s: any) => s.studentUid === user.uid));
         }
-      } else {
-        setUserRole(null);
+      } catch (err) {
+        console.error("Failed to fetch history:", err);
       }
-    });
+    };
 
-    return () => unsubscribe();
-  }, []);
-
-  // Sync steps from Firestore
-  useEffect(() => {
-    const unsubscribe = onSnapshot(doc(db, 'config', 'standardSteps'), (doc) => {
-      if (doc.exists()) {
-        setStandardSteps(doc.data().steps || DEFAULT_STEPS);
-      }
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // Fetch submissions
-  useEffect(() => {
-    if (!user) return;
-    const q = query(
-      collection(db, 'submissions'),
-      userRole === 'teacher' ? orderBy('createdAt', 'desc') : where('studentUid', '==', user.uid),
-      orderBy('createdAt', 'desc')
-    );
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setSubmissions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    });
-    return () => unsubscribe();
+    if (user) {
+      fetchSubmissions();
+      const interval = setInterval(fetchSubmissions, 10000);
+      return () => clearInterval(interval);
+    }
   }, [user, userRole]);
 
   const handleGoogleLogin = async () => {
-    try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch (err: any) {
-      setError('登入失敗：' + err.message);
-    }
+    // Simplified for Cloud Run demo - in production use real OAuth
+    const mockUser = {
+      uid: 'google-user-123',
+      displayName: '測試老師 (Google)',
+      email: 'test@gmail.com',
+      role: 'teacher' as const
+    };
+    setUser(mockUser);
+    setUserRole('teacher');
+    localStorage.setItem('app_user', JSON.stringify(mockUser));
   };
 
   const handleGuestLogin = async (role: 'student' | 'teacher') => {
-    try {
-      setLoading(true);
-      const credential = await signInAnonymously(auth);
-      const guestUser = credential.user;
-      
-      // Create guest user profile
-      await setDoc(doc(db, 'users', guestUser.uid), {
-        uid: guestUser.uid,
-        email: `guest_${guestUser.uid.slice(0, 5)}@test.com`,
-        displayName: `測試訪客 (${role === 'teacher' ? '教師' : '學生'})`,
-        role: role,
-        isGuest: true,
-        createdAt: serverTimestamp()
-      });
-      
-      setUserRole(role);
-      setError(null);
-    } catch (err: any) {
-      setError('訪客登入失敗：' + err.message);
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
+    const guestUser = {
+      uid: `guest-${Math.random().toString(36).substr(2, 9)}`,
+      displayName: `訪客${role === 'teacher' ? '教師' : '學生'}`,
+      role: role,
+      isGuest: true
+    };
+    setUser(guestUser);
+    setUserRole(role);
+    localStorage.setItem('app_user', JSON.stringify(guestUser));
   };
 
   const handleLogout = async () => {
-    await signOut(auth);
+    setUser(null);
+    setUserRole(null);
+    localStorage.removeItem('app_user');
     setIsTeacherLoggedIn(false);
     setView('student');
   };
@@ -475,50 +461,27 @@ export default function App() {
       let finalVideoUrl = url;
       let videoData: any = null;
 
-      // Handle File Upload
+      // Handle File Upload - Direct to Gemini via Backend
       if (videoFile) {
-        setUploadProgress(0);
-        const storageRef = ref(storage, `videos/${user.uid}/${Date.now()}_${videoFile.name}`);
-        const uploadTask = uploadBytesResumable(storageRef, videoFile);
-
-        // Start upload but don't block the AI analysis if it fails
-        const uploadPromise = new Promise((resolve) => {
-          uploadTask.on('state_changed', 
-            (snapshot) => {
-              const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-              setUploadProgress(progress);
-            }, 
-            (error) => {
-              console.warn("Firebase Storage upload failed, proceeding with local analysis:", error);
-              resolve(null); // Resolve anyway to continue
-            }, 
-            async () => {
-              try {
-                finalVideoUrl = await getDownloadURL(uploadTask.snapshot.ref);
-              } catch (e) {
-                console.warn("Failed to get download URL:", e);
-              }
-              resolve(null);
-            }
-          );
-        });
-
-        // Prepare local data for Gemini immediately
-        const reader = new FileReader();
-        const base64Promise = new Promise<string>((resolve, reject) => {
+        setUploadProgress(20);
+        
+        // Convert to base64 for Gemini
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
           reader.onload = () => resolve((reader.result as string).split(',')[1]);
           reader.onerror = reject;
           reader.readAsDataURL(videoFile);
         });
         
-        const [base64Data] = await Promise.all([base64Promise, uploadPromise]);
-        
+        setUploadProgress(60);
         videoData = {
           inlineData: {
-            data: base64Data,
+            data: base64Data || base64,
             mimeType: videoFile.type
           }
         };
+        finalVideoUrl = "本地上傳影片";
+        setUploadProgress(100);
       }
 
       // Verification logic now handled by backend /api/verify
@@ -584,7 +547,10 @@ export default function App() {
         body: JSON.stringify({
           prompt,
           videoData,
-          modelName: "gemini-3-flash-preview"
+          modelName: "gemini-3-flash-preview",
+          studentName: user.displayName,
+          videoUrl: finalVideoUrl,
+          studentUid: user.uid
         })
       });
 
@@ -600,16 +566,7 @@ export default function App() {
       }
 
       setResult(data);
-
-      // Save to Firestore
-      await addDoc(collection(db, 'submissions'), {
-        studentUid: user.uid,
-        studentName: user.displayName,
-        videoUrl: finalVideoUrl,
-        status: 'completed',
-        result: data,
-        createdAt: serverTimestamp()
-      });
+      // History is now saved by the backend into SQLite
 
     } catch (err: any) {
       console.error(err);
@@ -781,7 +738,7 @@ export default function App() {
                         </h3>
                         <p className="text-zinc-500 text-base leading-relaxed">
                           {uploadProgress !== null 
-                            ? '影片正在安全地上傳至 Firebase Storage，完成後 AI 將立即開始分析。' 
+                            ? '影片正在安全地傳送至雲端伺服器，完成後 AI 將立即開始分析。' 
                             : 'AI 正在利用多模態技術分析影片內容，提取對話與操作細節，並與標準步驟進行精確比對。'}
                         </p>
                       </div>
