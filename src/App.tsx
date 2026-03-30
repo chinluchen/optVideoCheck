@@ -575,7 +575,7 @@ export default function App() {
         body: JSON.stringify({
           prompt,
           videoData,
-          modelName: "gemini-3.1-pro-preview"
+          modelName: "gemini-3-flash-preview"
         })
       });
 
