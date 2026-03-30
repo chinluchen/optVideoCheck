@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI } from "@google/genai";
 import { YoutubeTranscript } from 'youtube-transcript';
 import { 
   Youtube, 
@@ -522,7 +521,7 @@ export default function App() {
         };
       }
 
-      // 1. Fetch the actual transcript (Whisper-like functionality) for YouTube
+      // Verification logic now handled by backend /api/verify
       let actualTranscript = "";
       if (url.trim()) {
         try {
@@ -535,21 +534,11 @@ export default function App() {
         }
       }
 
-      // Get API Key from multiple possible sources
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || (window as any).process?.env?.GEMINI_API_KEY || "";
-      
-      if (!apiKey) {
-        throw new Error('找不到 Gemini API Key。請確保已在環境變數中設定 VITE_GEMINI_API_KEY 或 GEMINI_API_KEY。');
-      }
-
-      const ai = new GoogleGenAI({ apiKey });
-      const model = "gemini-3.1-pro-preview";
-
       const prompt = `
         你是一位極度嚴謹的「驗光臨床技術考官」。你的任務是審核學生的實驗操作影片。
         
         【審核原則】：
-        1. 證據導向：只有在影片中「明確看到」或「明確聽到」的操作才能被認定為已執行。
+        1. 證據導向：只有在影片中「明確看到」與「明確聽到」的操作才能被認定為已執行。
         2. 嚴禁幻覺：絕對不可假設學生「應該有做」或「可能做了」某個動作。如果影片中沒出現，就視為「缺失」。
         3. 語音與畫面並重：驗光實驗中，與受檢者的對話（指令）與手部動作同樣重要。
         
@@ -579,19 +568,23 @@ export default function App() {
         }
       `;
 
-      const contents = videoData ? { parts: [videoData, { text: prompt }] } : prompt;
-
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: contents,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0, // 降低隨機性，減少幻覺
-          tools: url ? [{ urlContext: {} }] : []
-        }
+      // Call Backend API instead of direct SDK
+      const apiResponse = await fetch('/api/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          videoData,
+          modelName: "gemini-3.1-pro-preview"
+        })
       });
 
-      const data = JSON.parse(response.text || '{}');
+      if (!apiResponse.ok) {
+        const errorData = await apiResponse.json();
+        throw new Error(errorData.error || '後端分析失敗');
+      }
+
+      const data = await apiResponse.json();
       
       if ((!data.transcript || data.transcript.length < 50) && actualTranscript) {
         data.transcript = actualTranscript;
