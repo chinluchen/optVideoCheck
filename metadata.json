@@ -1,0 +1,5 @@
+{
+  "name": "驗光實驗步驟驗證系統",
+  "description": "學生可上傳 YouTube 連結或影片檔案，系統利用 AI 分析影音內容並驗證驗光實驗操作步驟，並將結果儲存於 Firebase。",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,57 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["student", "teacher"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Step": {
+      "title": "Step",
+      "description": "A single experimental step",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "correctAnswer": { "type": "string" },
+        "order": { "type": "integer" }
+      },
+      "required": ["id", "title", "correctAnswer", "order"]
+    },
+    "VideoSubmission": {
+      "title": "VideoSubmission",
+      "description": "A student's video submission and its analysis",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "studentUid": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "processing", "completed", "failed"] },
+        "result": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "studentUid", "videoUrl", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/config/standardSteps": {
+      "schema": "object",
+      "description": "The current standard steps configuration"
+    },
+    "/submissions/{submissionId}": {
+      "schema": "VideoSubmission",
+      "description": "Student video submissions"
+    }
+  }
+}
