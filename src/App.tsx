@@ -535,7 +535,14 @@ export default function App() {
         }
       }
 
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      // Get API Key from multiple possible sources
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || (window as any).process?.env?.GEMINI_API_KEY || "";
+      
+      if (!apiKey) {
+        throw new Error('找不到 Gemini API Key。請確保已在環境變數中設定 VITE_GEMINI_API_KEY 或 GEMINI_API_KEY。');
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
       const model = "gemini-3.1-pro-preview";
 
       const prompt = `
