@@ -57,7 +57,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     // Production: Serve static files from dist
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
     
     // SPA fallback: All other routes serve index.html
