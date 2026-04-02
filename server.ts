@@ -210,18 +210,35 @@ async function startServer() {
           tempFilePath = path.join(tmpdir(), `gemini_upload_${randomUUID()}.${extension}`);
           fs.writeFileSync(tempFilePath, buffer);
           
-          console.log("正在上傳至 Gemini File API...");
-          const uploadResult = await (ai as any).files.upload(tempFilePath, {
-            mimeType,
-            displayName: "Student Upload",
-          });
+          const stats = fs.statSync(tempFilePath);
+          console.log(`暫存檔案已建立: ${tempFilePath}, 大小: ${stats.size} bytes`);
           
-          console.log("上傳完成，等待影片處理...");
-          let file = await (ai as any).files.get(uploadResult.file.name);
+          console.log("正在上傳至 Gemini File API...");
+          let uploadResult;
+          try {
+            uploadResult = await (ai as any).files.upload(tempFilePath, {
+              mimeType,
+              displayName: "Student Upload",
+            });
+            console.log("Gemini File API 上傳成功:", JSON.stringify(uploadResult));
+          } catch (uploadError: any) {
+            console.error("Gemini File API 上傳失敗:", uploadError);
+            throw new Error(`Gemini 檔案上傳失敗: ${uploadError.message}`);
+          }
+          
+          // 根據 SDK 版本，結果可能是 { file: File } 或直接是 File
+          const fileObj = uploadResult.file || uploadResult;
+          if (!fileObj || !fileObj.name) {
+            console.error("無法從上傳結果中取得檔案資訊:", uploadResult);
+            throw new Error("Gemini 上傳失敗: 無法取得檔案資訊");
+          }
+
+          console.log("正在等待影片處理:", fileObj.name);
+          let file = await (ai as any).files.get(fileObj.name);
           let pollCount = 0;
-          while (file.state === 'PROCESSING' && pollCount < 30) {
+          while (file.state === 'PROCESSING' && pollCount < 60) { // 增加等待時間到 120 秒
             await new Promise(resolve => setTimeout(resolve, 2000));
-            file = await (ai as any).files.get(uploadResult.file.name);
+            file = await (ai as any).files.get(fileObj.name);
             pollCount++;
           }
           
