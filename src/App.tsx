@@ -466,7 +466,7 @@ export default function App() {
 
       // Handle File Upload - Direct to Gemini via Backend
       if (videoFile) {
-        setUploadProgress(20);
+        setUploadProgress(5);
         
         // Convert to base64 for Gemini
         const base64 = await new Promise<string>((resolve, reject) => {
@@ -476,7 +476,7 @@ export default function App() {
           reader.readAsDataURL(videoFile);
         });
         
-        setUploadProgress(60);
+        setUploadProgress(10);
         videoData = {
           inlineData: {
             data: base64,
@@ -484,7 +484,6 @@ export default function App() {
           }
         };
         finalVideoUrl = "本地上傳影片";
-        setUploadProgress(100);
       }
 
       // Verification logic now handled by backend /api/verify
@@ -589,33 +588,51 @@ export default function App() {
         }
       `;
 
-      // Call Backend API instead of direct SDK
-      const apiResponse = await fetch('/api/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      // Call Backend API with real upload progress
+      const data = await new Promise<any>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/verify');
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            // Map 0-100% upload to 10-95% total progress
+            const percentComplete = (event.loaded / event.total) * 85;
+            setUploadProgress(10 + percentComplete);
+          }
+        };
+        
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            setUploadProgress(100);
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch (e) {
+              reject(new Error('伺服器回傳格式錯誤'));
+            }
+          } else {
+            let errorMessage = '後端分析失敗';
+            try {
+              const errorData = JSON.parse(xhr.responseText);
+              errorMessage = errorData.error || errorMessage;
+            } catch (e) {
+              errorMessage = `伺服器錯誤 (${xhr.status}): ${xhr.statusText}`;
+            }
+            reject(new Error(errorMessage));
+          }
+        };
+        
+        xhr.onerror = () => reject(new Error('網路連線錯誤'));
+        
+        xhr.send(JSON.stringify({
           prompt,
           videoData,
           modelName: "gemini-3-flash-preview",
           studentName: user.displayName,
           videoUrl: finalVideoUrl,
           studentUid: user.uid
-        })
+        }));
       });
-
-      if (!apiResponse.ok) {
-        let errorMessage = '後端分析失敗';
-        try {
-          const errorData = await apiResponse.json();
-          errorMessage = errorData.error || errorMessage;
-        } catch (e) {
-          // If response is not JSON (e.g. HTML error page)
-          errorMessage = `伺服器錯誤 (${apiResponse.status}): ${apiResponse.statusText}`;
-        }
-        throw new Error(errorMessage);
-      }
-
-      const data = await apiResponse.json();
       
       if ((!data.transcript || data.transcript.length < 50) && actualTranscript) {
         data.transcript = actualTranscript;
@@ -790,11 +807,15 @@ export default function App() {
                       </div>
                       <div className="space-y-4">
                         <h3 className="text-2xl font-black text-zinc-900 tracking-tight">
-                          {uploadProgress !== null ? `正在上傳影片... ${Math.round(uploadProgress)}%` : transcriptionStatus || '正在讀取影音並轉為文字...'}
+                          {uploadProgress !== null 
+                            ? (uploadProgress >= 95 ? "正在進行 AI 專業分析..." : `正在上傳影片... ${Math.round(uploadProgress)}%`)
+                            : transcriptionStatus || '正在讀取影音並轉為文字...'}
                         </h3>
                         <p className="text-zinc-500 text-base leading-relaxed">
                           {uploadProgress !== null 
-                            ? '影片正在安全地傳送至雲端伺服器，完成後 AI 將立即開始分析。' 
+                            ? (uploadProgress >= 95 
+                                ? '影片已成功送達，AI 考官正在仔細審查每一個操作細節，請稍候。' 
+                                : '影片正在安全地傳送至雲端伺服器，完成後 AI 將立即開始分析。')
                             : transcriptionStatus 
                               ? '背景處理程序正在運作中，這可能需要一點時間，您可以稍候或查看進度。'
                               : 'AI 正在利用多模態技術分析影片內容，提取對話與操作細節，並與標準步驟進行精確比對。'}
