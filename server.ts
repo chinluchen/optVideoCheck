@@ -174,7 +174,7 @@ async function startServer() {
     console.log("收到驗證請求...");
     let tempFilePath: string | null = null;
     try {
-      const { prompt, videoData, modelName, studentName, videoUrl } = req.body;
+      const { prompt, videoData, studentName, videoUrl } = req.body;
       const apiKey = process.env.GEMINI_API_KEY;
 
       if (!apiKey) {
@@ -182,14 +182,29 @@ async function startServer() {
         return res.status(500).json({ error: "伺服器尚未設定 GEMINI_API_KEY，請在 Cloud Run 環境變數中設定。" });
       }
 
-      const ai = new GoogleGenAI({ apiKey });
+      // 修正：使用官方建議的模型初始化方式，並加入「系統指令」調整口氣
+      const genAI = new GoogleGenAI({ apiKey });
+      const model = genAI.getGenerativeModel({ 
+        model: "gemini-1.5-flash", // 強制使用穩定版，避免 503 錯誤
+        systemInstruction: `
+          你是一位專業且親切的台灣「視光系實驗課助教」。
+          請根據影片內容進行評分。
+          
+          回覆規範：
+          1. 語氣：親切、鼓勵，請用「同學你好，我是助教」作為開頭。
+          2. 術語：必須使用台灣常用的視光術語（如：PD、遮蓋測試、視網膜檢影鏡）。
+          3. 結構：指出優點、需要改進的地方、以及最終建議。
+          4. 格式：必須嚴格遵守 JSON 格式回傳，包含 score (0-100) 與 feedback (字串) 欄位。
+        `,
+      });
+
       let contents: any;
 
       if (videoData && videoData.inlineData) {
         const base64Data = videoData.inlineData.data;
         const mimeType = videoData.inlineData.mimeType;
         
-        // If the data is large (> 10MB base64), use File API to avoid payload limits
+        // 影片較大時的上傳處理邏輯保持不變
         if (base64Data.length > 10 * 1024 * 1024) {
           console.log(`影片較大 (${(base64Data.length / 1024 / 1024).toFixed(2)} MB)，使用 File API 上傳...`);
           const buffer = Buffer.from(base64Data, 'base64');
@@ -198,73 +213,70 @@ async function startServer() {
           fs.writeFileSync(tempFilePath, buffer);
           
           console.log("正在上傳至 Gemini File API...");
-          const uploadResult = await (ai.files as any).upload(tempFilePath, {
+          const uploadResult = await (genAI as any).files.upload(tempFilePath, {
             mimeType,
             displayName: "Student Upload",
           });
           
           console.log("上傳完成，等待影片處理...");
-          let file = await (ai.files as any).get(uploadResult.file.name);
+          let file = await (genAI as any).files.get(uploadResult.file.name);
           let pollCount = 0;
           while (file.state === 'PROCESSING' && pollCount < 30) {
             await new Promise(resolve => setTimeout(resolve, 2000));
-            file = await (ai.files as any).get(uploadResult.file.name);
+            file = await (genAI as any).files.get(uploadResult.file.name);
             pollCount++;
           }
           
-          if (file.state === 'FAILED') {
-            throw new Error("Gemini 影片處理失敗");
-          }
-          if (file.state === 'PROCESSING') {
-            throw new Error("影片處理超時");
-          }
+          if (file.state === 'FAILED') throw new Error("Gemini 影片處理失敗");
+          if (file.state === 'PROCESSING') throw new Error("影片處理超時");
           
-          console.log("影片處理完成，開始分析...");
-          contents = {
-            parts: [
-              { fileData: { fileUri: file.uri, mimeType: file.mimeType } },
-              { text: prompt }
-            ]
-          };
+          contents = [
+            { fileData: { fileUri: file.uri, mimeType: file.mimeType } },
+            { text: prompt || "請分析這段操作影片並給予建議。" }
+          ];
         } else {
           console.log("影片較小，使用 inlineData 分析...");
-          contents = { parts: [videoData, { text: prompt }] };
+          contents = [videoData, { text: prompt || "請分析這段操作影片並給予建議。" }];
         }
       } else {
-        console.log("無影片數據，進行純文本分析...");
-        contents = prompt;
+        contents = [{ text: prompt }];
       }
 
-      const result = await ai.models.generateContent({
-        model: modelName || "gemini-3-flash-preview",
-        contents,
-        config: { responseMimeType: "application/json", temperature: 0 }
+      // 執行分析
+      const result = await model.generateContent({
+        contents: [{ role: "user", parts: contents }],
+        generationConfig: { 
+          responseMimeType: "application/json", 
+          temperature: 0.2 // 調低溫度讓 AI 回覆格式更穩定
+        }
       });
 
-      let text = result.text || "{}";
+      const response = await result.response;
+      let text = response.text() || "{}";
       console.log("Gemini 分析完成，正在解析結果...");
       
-      // Clean up markdown code blocks if present
-      if (text.includes("```json")) {
-        text = text.split("```json")[1].split("```")[0].trim();
-      } else if (text.includes("```")) {
-        text = text.split("```")[1].split("```")[0].trim();
-      }
+      // 清理 Markdown 標籤的防呆機制
+      text = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
       const analysisResult = JSON.parse(text);
 
-      // Save to SQLite
+      // 儲存至 SQLite
       console.log("正在儲存至資料庫...");
       const stmt = db.prepare("INSERT INTO submissions (studentName, videoUrl, score, result) VALUES (?, ?, ?, ?)");
       stmt.run(studentName || "匿名學生", videoUrl || "本地上傳", analysisResult.score || 0, JSON.stringify(analysisResult));
 
       console.log("驗證成功！");
       res.json(analysisResult);
+
     } catch (error: any) {
       console.error("Gemini Error:", error.message);
-      res.status(500).json({ error: error.message || "分析過程中發生未知錯誤" });
+      // 如果遇到 503 錯誤，特別回傳讓前端知道
+      const status = error.message.includes("503") ? 503 : 500;
+      res.status(status).json({ 
+        error: error.message || "分析過程中發生未知錯誤",
+        isQuotaError: error.message.includes("high demand")
+      });
     } finally {
-      // Cleanup temp file
       if (tempFilePath && fs.existsSync(tempFilePath)) {
         try {
           fs.unlinkSync(tempFilePath);
