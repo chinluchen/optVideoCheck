@@ -182,21 +182,19 @@ async function startServer() {
         return res.status(500).json({ error: "伺服器尚未設定 GEMINI_API_KEY，請在 Cloud Run 環境變數中設定。" });
       }
 
-      // 修正：使用官方建議的模型初始化方式，並加入「系統指令」調整口氣
-      const genAI = new GoogleGenAI({ apiKey });
-      const model = genAI.getGenerativeModel({ 
-        model: "gemini-1.5-flash", // 強制使用穩定版，避免 503 錯誤
-        systemInstruction: `
-          你是一位專業且親切的台灣「視光系實驗課助教」。
-          請根據影片內容進行評分。
-          
-          回覆規範：
-          1. 語氣：親切、鼓勵，請用「同學你好，我是助教」作為開頭。
-          2. 術語：必須使用台灣常用的視光術語（如：PD、遮蓋測試、視網膜檢影鏡）。
-          3. 結構：指出優點、需要改進的地方、以及最終建議。
-          4. 格式：必須嚴格遵守 JSON 格式回傳，包含 score (0-100) 與 feedback (字串) 欄位。
-        `,
-      });
+      // 使用正確的 SDK 初始化方式
+      const ai = new GoogleGenAI({ apiKey });
+      
+      const systemInstruction = `
+        你是一位專業且親切的台灣「視光系實驗課助教」。
+        請根據影片內容進行評分。
+        
+        回覆規範：
+        1. 語氣：親切、鼓勵，請用「同學你好，我是助教」作為開頭。
+        2. 術語：必須使用台灣常用的視光術語（如：PD、遮蓋測試、視網膜檢影鏡）。
+        3. 結構：指出優點、需要改進的地方、以及最終建議。
+        4. 格式：必須嚴格遵守 JSON 格式回傳，包含 score (0-100) 與 feedback (字串) 欄位。
+      `;
 
       let contents: any;
 
@@ -204,7 +202,7 @@ async function startServer() {
         const base64Data = videoData.inlineData.data;
         const mimeType = videoData.inlineData.mimeType;
         
-        // 影片較大時的上傳處理邏輯保持不變
+        // 影片較大時的上傳處理邏輯
         if (base64Data.length > 10 * 1024 * 1024) {
           console.log(`影片較大 (${(base64Data.length / 1024 / 1024).toFixed(2)} MB)，使用 File API 上傳...`);
           const buffer = Buffer.from(base64Data, 'base64');
@@ -213,17 +211,17 @@ async function startServer() {
           fs.writeFileSync(tempFilePath, buffer);
           
           console.log("正在上傳至 Gemini File API...");
-          const uploadResult = await (genAI as any).files.upload(tempFilePath, {
+          const uploadResult = await (ai as any).files.upload(tempFilePath, {
             mimeType,
             displayName: "Student Upload",
           });
           
           console.log("上傳完成，等待影片處理...");
-          let file = await (genAI as any).files.get(uploadResult.file.name);
+          let file = await (ai as any).files.get(uploadResult.file.name);
           let pollCount = 0;
           while (file.state === 'PROCESSING' && pollCount < 30) {
             await new Promise(resolve => setTimeout(resolve, 2000));
-            file = await (genAI as any).files.get(uploadResult.file.name);
+            file = await (ai as any).files.get(uploadResult.file.name);
             pollCount++;
           }
           
@@ -242,17 +240,18 @@ async function startServer() {
         contents = [{ text: prompt }];
       }
 
-      // 執行分析
-      const result = await model.generateContent({
-        contents: [{ role: "user", parts: contents }],
-        generationConfig: { 
+      // 執行分析 - 使用正確的 ai.models.generateContent 模式
+      const result = await ai.models.generateContent({
+        model: "gemini-1.5-flash", // 使用穩定版
+        contents: { parts: contents },
+        config: { 
+          systemInstruction,
           responseMimeType: "application/json", 
-          temperature: 0.2 // 調低溫度讓 AI 回覆格式更穩定
+          temperature: 0.2 
         }
       });
 
-      const response = await result.response;
-      let text = response.text() || "{}";
+      let text = result.text || "{}";
       console.log("Gemini 分析完成，正在解析結果...");
       
       // 清理 Markdown 標籤的防呆機制
