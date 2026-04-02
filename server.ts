@@ -243,13 +243,17 @@ async function startServer() {
       // 執行分析 - 使用正確的 ai.models.generateContent 模式
       const result = await ai.models.generateContent({
         model: "gemini-1.5-flash", // 使用穩定版
-        contents: { parts: contents },
+        contents: [{ role: "user", parts: contents }],
         config: { 
           systemInstruction,
           responseMimeType: "application/json", 
-          temperature: 0.2 
+          temperature: 0.1 // 調低溫度讓 AI 回覆格式更穩定
         }
       });
+
+      if (!result.candidates || result.candidates.length === 0) {
+        throw new Error("Gemini 未能生成任何結果，請稍後再試。");
+      }
 
       let text = result.text || "{}";
       console.log("Gemini 分析完成，正在解析結果...");
