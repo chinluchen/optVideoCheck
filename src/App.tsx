@@ -239,6 +239,7 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [submissions, setSubmissions] = useState<any[]>([]);
+  const [transcriptionStatus, setTranscriptionStatus] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -367,9 +368,11 @@ export default function App() {
     const newSteps = [...standardSteps];
     newSteps[index] = { ...newSteps[index], correctAnswer: answer };
     setStandardSteps(newSteps);
-    // Sync to Firestore if teacher
+    // Sync to Backend if teacher
     if (isTeacherLoggedIn || userRole === 'teacher') {
-      setDoc(doc(db, 'config', 'standardSteps'), { steps: newSteps });
+      // In a real app, we'd have a /api/config endpoint
+      // For now, we just update local state
+      console.log("Steps updated locally");
     }
   };
 
@@ -476,7 +479,7 @@ export default function App() {
         setUploadProgress(60);
         videoData = {
           inlineData: {
-            data: base64Data || base64,
+            data: base64,
             mimeType: videoFile.type
           }
         };
@@ -488,12 +491,58 @@ export default function App() {
       let actualTranscript = "";
       if (url.trim()) {
         try {
-          const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
-          actualTranscript = transcriptItems
-            .map(item => `[${Math.floor(item.offset / 1000 / 60)}:${(Math.floor(item.offset / 1000) % 60).toString().padStart(2, '0')}] ${item.text}`)
-            .join('\n');
+          setTranscriptionStatus('正在啟動後台轉錄程序...');
+          const transcribeRes = await fetch('/api/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ videoUrl: url })
+          });
+          
+          if (!transcribeRes.ok) throw new Error('無法啟動轉錄程序');
+          
+          const { id } = await transcribeRes.json();
+          
+          // Polling
+          let status = 'pending';
+          let attempts = 0;
+          const maxAttempts = 60; // 3 minutes max
+
+          while ((status === 'pending' || status === 'processing') && attempts < maxAttempts) {
+            attempts++;
+            await new Promise(r => setTimeout(r, 3000));
+            const pollRes = await fetch(`/api/transcription/${id}`);
+            const pollData = await pollRes.json();
+            status = pollData.status;
+            
+            if (status === 'processing') {
+              setTranscriptionStatus('正在下載並轉錄音訊 (Whisper)...');
+            } else if (status === 'completed') {
+              actualTranscript = pollData.transcript;
+              setTranscriptionStatus('轉錄完成！');
+            } else if (status === 'failed') {
+              console.warn("Whisper transcription failed:", pollData.error);
+              setTranscriptionStatus('Whisper 轉錄失敗，嘗試備用方案...');
+              // Fallback to old method
+              try {
+                const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
+                actualTranscript = transcriptItems
+                  .map(item => `[${Math.floor(item.offset / 1000 / 60)}:${(Math.floor(item.offset / 1000) % 60).toString().padStart(2, '0')}] ${item.text}`)
+                  .join('\n');
+              } catch (e) {}
+              break;
+            }
+          }
         } catch (transcriptErr) {
-          console.warn("Could not fetch transcript directly:", transcriptErr);
+          console.warn("Transcription queue error:", transcriptErr);
+          // Fallback to old method
+          try {
+            const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
+            actualTranscript = transcriptItems
+              .map(item => `[${Math.floor(item.offset / 1000 / 60)}:${(Math.floor(item.offset / 1000) % 60).toString().padStart(2, '0')}] ${item.text}`)
+              .join('\n');
+          } catch (e) {}
+        } finally {
+          setTimeout(() => setTranscriptionStatus(null), 2000);
         }
       }
 
@@ -734,12 +783,14 @@ export default function App() {
                       </div>
                       <div className="space-y-4">
                         <h3 className="text-2xl font-black text-zinc-900 tracking-tight">
-                          {uploadProgress !== null ? `正在上傳影片... ${Math.round(uploadProgress)}%` : '正在讀取影音並轉為文字...'}
+                          {uploadProgress !== null ? `正在上傳影片... ${Math.round(uploadProgress)}%` : transcriptionStatus || '正在讀取影音並轉為文字...'}
                         </h3>
                         <p className="text-zinc-500 text-base leading-relaxed">
                           {uploadProgress !== null 
                             ? '影片正在安全地傳送至雲端伺服器，完成後 AI 將立即開始分析。' 
-                            : 'AI 正在利用多模態技術分析影片內容，提取對話與操作細節，並與標準步驟進行精確比對。'}
+                            : transcriptionStatus 
+                              ? '背景處理程序正在運作中，這可能需要一點時間，您可以稍候或查看進度。'
+                              : 'AI 正在利用多模態技術分析影片內容，提取對話與操作細節，並與標準步驟進行精確比對。'}
                         </p>
                       </div>
                       {uploadProgress !== null && (
