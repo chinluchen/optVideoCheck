@@ -242,7 +242,7 @@ async function startServer() {
 
       // 執行分析 - 使用正確的 ai.models.generateContent 模式
       const result = await ai.models.generateContent({
-        model: "gemini-1.5-flash", // 使用穩定版
+        model: "gemini-3-flash-preview", // 使用推薦的穩定版
         contents: [{ role: "user", parts: contents }],
         config: { 
           systemInstruction,
