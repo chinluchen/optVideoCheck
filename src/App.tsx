@@ -604,8 +604,15 @@ export default function App() {
       });
 
       if (!apiResponse.ok) {
-        const errorData = await apiResponse.json();
-        throw new Error(errorData.error || '後端分析失敗');
+        let errorMessage = '後端分析失敗';
+        try {
+          const errorData = await apiResponse.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch (e) {
+          // If response is not JSON (e.g. HTML error page)
+          errorMessage = `伺服器錯誤 (${apiResponse.status}): ${apiResponse.statusText}`;
+        }
+        throw new Error(errorMessage);
       }
 
       const data = await apiResponse.json();

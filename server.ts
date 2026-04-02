@@ -15,6 +15,14 @@ import { randomUUID } from "crypto";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -111,8 +119,17 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT || 3000;
 
-  app.use(express.json({ limit: '100mb' }));
-  app.use(express.urlencoded({ limit: '100mb', extended: true }));
+  app.use(express.json({ limit: '200mb' }));
+  app.use(express.urlencoded({ limit: '200mb', extended: true }));
+
+  // Global error handler for middleware (e.g. JSON limit exceeded)
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err) {
+      console.error("Server Middleware Error:", err);
+      return res.status(err.status || 500).json({ error: err.message || "伺服器中介軟體錯誤" });
+    }
+    next();
+  });
 
   // API Routes
   app.get("/api/health", (req, res) => {
@@ -170,7 +187,15 @@ async function startServer() {
         config: { responseMimeType: "application/json", temperature: 0 }
       });
 
-      const analysisResult = JSON.parse(result.text || "{}");
+      let text = result.text || "{}";
+      // Clean up markdown code blocks if present
+      if (text.includes("```json")) {
+        text = text.split("```json")[1].split("```")[0].trim();
+      } else if (text.includes("```")) {
+        text = text.split("```")[1].split("```")[0].trim();
+      }
+
+      const analysisResult = JSON.parse(text);
 
       // Save to SQLite
       const stmt = db.prepare("INSERT INTO submissions (studentName, videoUrl, score, result) VALUES (?, ?, ?, ?)");
@@ -181,6 +206,11 @@ async function startServer() {
       console.error("Gemini Error:", error.message);
       res.status(500).json({ error: error.message });
     }
+  });
+
+  // Catch-all for API routes to prevent HTML fallback
+  app.all("/api/*", (req, res) => {
+    res.status(404).json({ error: `Route ${req.method} ${req.url} not found` });
   });
 
   // Vite middleware for development
