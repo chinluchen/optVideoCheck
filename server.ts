@@ -292,8 +292,9 @@ async function startServer() {
       console.error("Gemini Error:", error.message);
       // 如果遇到 503 錯誤，特別回傳讓前端知道
       const status = error.message.includes("503") ? 503 : 500;
+      const displayMessage = status === 503 ? "伺服器忙線中，稍後再試" : (error.message || "分析過程中發生未知錯誤");
       res.status(status).json({ 
-        error: error.message || "分析過程中發生未知錯誤",
+        error: displayMessage,
         isQuotaError: error.message.includes("high demand")
       });
     } finally {
