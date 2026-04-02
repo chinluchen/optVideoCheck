@@ -172,22 +172,78 @@ async function startServer() {
   // Backend Gemini Proxy
   app.post("/api/verify", async (req, res) => {
     console.log("收到驗證請求...");
+    let tempFilePath: string | null = null;
     try {
       const { prompt, videoData, modelName, studentName, videoUrl } = req.body;
       const apiKey = process.env.GEMINI_API_KEY;
 
       if (!apiKey) {
-        return res.status(500).json({ error: "伺服器尚未設定 GEMINI_API_KEY" });
+        console.error("錯誤: 缺少 GEMINI_API_KEY");
+        return res.status(500).json({ error: "伺服器尚未設定 GEMINI_API_KEY，請在 Cloud Run 環境變數中設定。" });
       }
 
       const ai = new GoogleGenAI({ apiKey });
+      let contents: any;
+
+      if (videoData && videoData.inlineData) {
+        const base64Data = videoData.inlineData.data;
+        const mimeType = videoData.inlineData.mimeType;
+        
+        // If the data is large (> 10MB base64), use File API to avoid payload limits
+        if (base64Data.length > 10 * 1024 * 1024) {
+          console.log(`影片較大 (${(base64Data.length / 1024 / 1024).toFixed(2)} MB)，使用 File API 上傳...`);
+          const buffer = Buffer.from(base64Data, 'base64');
+          const extension = mimeType.split('/')[1] || 'mp4';
+          tempFilePath = path.join(tmpdir(), `gemini_upload_${randomUUID()}.${extension}`);
+          fs.writeFileSync(tempFilePath, buffer);
+          
+          console.log("正在上傳至 Gemini File API...");
+          const uploadResult = await (ai.files as any).upload(tempFilePath, {
+            mimeType,
+            displayName: "Student Upload",
+          });
+          
+          console.log("上傳完成，等待影片處理...");
+          let file = await (ai.files as any).get(uploadResult.file.name);
+          let pollCount = 0;
+          while (file.state === 'PROCESSING' && pollCount < 30) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            file = await (ai.files as any).get(uploadResult.file.name);
+            pollCount++;
+          }
+          
+          if (file.state === 'FAILED') {
+            throw new Error("Gemini 影片處理失敗");
+          }
+          if (file.state === 'PROCESSING') {
+            throw new Error("影片處理超時");
+          }
+          
+          console.log("影片處理完成，開始分析...");
+          contents = {
+            parts: [
+              { fileData: { fileUri: file.uri, mimeType: file.mimeType } },
+              { text: prompt }
+            ]
+          };
+        } else {
+          console.log("影片較小，使用 inlineData 分析...");
+          contents = { parts: [videoData, { text: prompt }] };
+        }
+      } else {
+        console.log("無影片數據，進行純文本分析...");
+        contents = prompt;
+      }
+
       const result = await ai.models.generateContent({
         model: modelName || "gemini-3-flash-preview",
-        contents: videoData ? { parts: [videoData, { text: prompt }] } : prompt,
+        contents,
         config: { responseMimeType: "application/json", temperature: 0 }
       });
 
       let text = result.text || "{}";
+      console.log("Gemini 分析完成，正在解析結果...");
+      
       // Clean up markdown code blocks if present
       if (text.includes("```json")) {
         text = text.split("```json")[1].split("```")[0].trim();
@@ -198,13 +254,25 @@ async function startServer() {
       const analysisResult = JSON.parse(text);
 
       // Save to SQLite
+      console.log("正在儲存至資料庫...");
       const stmt = db.prepare("INSERT INTO submissions (studentName, videoUrl, score, result) VALUES (?, ?, ?, ?)");
       stmt.run(studentName || "匿名學生", videoUrl || "本地上傳", analysisResult.score || 0, JSON.stringify(analysisResult));
 
+      console.log("驗證成功！");
       res.json(analysisResult);
     } catch (error: any) {
       console.error("Gemini Error:", error.message);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: error.message || "分析過程中發生未知錯誤" });
+    } finally {
+      // Cleanup temp file
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        try {
+          fs.unlinkSync(tempFilePath);
+          console.log("暫存檔案已刪除");
+        } catch (e) {
+          console.error("刪除暫存檔案失敗:", e);
+        }
+      }
     }
   });
 
