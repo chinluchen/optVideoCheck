@@ -594,15 +594,38 @@ export default function App() {
         xhr.open('POST', '/api/verify');
         xhr.setRequestHeader('Content-Type', 'application/json');
         
+        // Start a timer to simulate analysis progress once upload is near complete
+        let analysisInterval: any;
+        const startAnalysisSim = (startVal: number) => {
+          if (analysisInterval) return;
+          analysisInterval = setInterval(() => {
+            setUploadProgress(prev => {
+              if (prev === null) return null;
+              if (prev >= 99) {
+                clearInterval(analysisInterval);
+                return 99;
+              }
+              // Increment slowly: 0.1% every 500ms
+              return prev + 0.1;
+            });
+          }, 500);
+        };
+
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable) {
-            // Map 0-100% upload to 10-95% total progress
-            const percentComplete = (event.loaded / event.total) * 85;
-            setUploadProgress(10 + percentComplete);
+            // Map 0-100% upload to 10-90% total progress
+            const percentComplete = (event.loaded / event.total) * 80;
+            const currentProgress = 10 + percentComplete;
+            setUploadProgress(currentProgress);
+            
+            if (currentProgress >= 89) {
+              startAnalysisSim(currentProgress);
+            }
           }
         };
         
         xhr.onload = () => {
+          if (analysisInterval) clearInterval(analysisInterval);
           if (xhr.status >= 200 && xhr.status < 300) {
             setUploadProgress(100);
             try {
@@ -622,7 +645,10 @@ export default function App() {
           }
         };
         
-        xhr.onerror = () => reject(new Error('網路連線錯誤'));
+        xhr.onerror = () => {
+          if (analysisInterval) clearInterval(analysisInterval);
+          reject(new Error('網路連線錯誤'));
+        };
         
         xhr.send(JSON.stringify({
           prompt,
@@ -808,7 +834,7 @@ export default function App() {
                       <div className="space-y-4">
                         <h3 className="text-2xl font-black text-zinc-900 tracking-tight">
                           {uploadProgress !== null 
-                            ? (uploadProgress >= 95 ? "正在進行 AI 專業分析..." : `正在上傳影片... ${Math.round(uploadProgress)}%`)
+                            ? (uploadProgress >= 95 ? "正在進行 AI 專業分析..." : "正在上傳影片...")
                             : transcriptionStatus || '正在讀取影音並轉為文字...'}
                         </h3>
                         <p className="text-zinc-500 text-base leading-relaxed">
@@ -822,12 +848,21 @@ export default function App() {
                         </p>
                       </div>
                       {uploadProgress !== null && (
-                        <div className="w-full bg-zinc-100 h-2 rounded-full overflow-hidden">
-                          <motion.div 
-                            className="bg-indigo-600 h-full"
-                            initial={{ width: 0 }}
-                            animate={{ width: `${uploadProgress}%` }}
-                          />
+                        <div className="w-full space-y-3">
+                          <div className="flex justify-between items-end">
+                            <span className="text-xs font-bold text-indigo-600 uppercase tracking-wider">處理進度</span>
+                            <span className="text-2xl font-black text-zinc-900 tabular-nums">
+                              {Math.round(uploadProgress)}%
+                            </span>
+                          </div>
+                          <div className="w-full bg-zinc-100 h-3 rounded-full overflow-hidden shadow-inner">
+                            <motion.div 
+                              className="bg-gradient-to-r from-indigo-500 to-indigo-600 h-full"
+                              initial={{ width: 0 }}
+                              animate={{ width: `${uploadProgress}%` }}
+                              transition={{ type: "spring", stiffness: 50, damping: 20 }}
+                            />
+                          </div>
                         </div>
                       )}
                       <div className="flex gap-2">
