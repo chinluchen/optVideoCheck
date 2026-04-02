@@ -514,13 +514,13 @@ export default function App() {
             status = pollData.status;
             
             if (status === 'processing') {
-              setTranscriptionStatus('正在下載並轉錄音訊 (Whisper)...');
+              setTranscriptionStatus('正在下載並轉錄音訊...');
             } else if (status === 'completed') {
               actualTranscript = pollData.transcript;
               setTranscriptionStatus('轉錄完成！');
             } else if (status === 'failed') {
               console.warn("Whisper transcription failed:", pollData.error);
-              setTranscriptionStatus('Whisper 轉錄失敗，嘗試備用方案...');
+              setTranscriptionStatus('轉錄失敗，嘗試備用方案...');
               // Fallback to old method
               try {
                 const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
@@ -1024,7 +1024,7 @@ export default function App() {
                           <div className="flex items-center justify-between mb-6">
                             <div className="flex items-center gap-2">
                               <RefreshCw className="w-4 h-4 text-emerald-400 animate-spin-slow" />
-                              <h4 className="text-xs font-black text-zinc-400 uppercase tracking-widest">Whisper 影音轉文字紀錄</h4>
+                              <h4 className="text-xs font-black text-zinc-400 uppercase tracking-widest">影音轉文字紀錄</h4>
                             </div>
                             <div className="flex items-center gap-2">
                               <button 
