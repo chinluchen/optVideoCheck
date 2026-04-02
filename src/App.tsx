@@ -94,12 +94,12 @@ interface Step {
 }
 
 interface VerificationResult {
-  isCorrect: boolean;
   score: number;
-  feedback: string;
-  detectedSteps: string[];
-  missingSteps: string[];
-  transcript: string;
+  summary: string;
+  timeline: {time: string, action: string}[];
+  strengths: string[];
+  weaknesses: string[];
+  advice: string;
 }
 
 interface SortableStepItemProps {
@@ -337,19 +337,21 @@ export default function App() {
   };
 
   const handleCopyTranscript = () => {
-    if (!result?.transcript) return;
-    navigator.clipboard.writeText(result.transcript);
+    if (!result?.timeline) return;
+    const text = result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
+    navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   const handleDownloadTranscript = () => {
-    if (!result?.transcript) return;
-    const blob = new Blob([result.transcript], { type: 'text/plain' });
+    if (!result?.timeline) return;
+    const text = result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
+    const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `transcript_${new Date().getTime()}.txt`;
+    a.download = `timeline_${new Date().getTime()}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -521,52 +523,17 @@ export default function App() {
             } else if (status === 'failed') {
               console.warn("Whisper transcription failed:", pollData.error);
               setTranscriptionStatus('轉錄失敗，嘗試備用方案...');
-              // Fallback to old method
-              try {
-                const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
-                actualTranscript = transcriptItems
-                  .map(item => `[${Math.floor(item.offset / 1000 / 60)}:${(Math.floor(item.offset / 1000) % 60).toString().padStart(2, '0')}] ${item.text}`)
-                  .join('\n');
-              } catch (e) {}
               break;
             }
           }
         } catch (transcriptErr) {
           console.warn("Transcription queue error:", transcriptErr);
-          // Fallback to old method
-          try {
-            const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
-            actualTranscript = transcriptItems
-              .map(item => `[${Math.floor(item.offset / 1000 / 60)}:${(Math.floor(item.offset / 1000) % 60).toString().padStart(2, '0')}] ${item.text}`)
-              .join('\n');
-          } catch (e) {}
         } finally {
           setTimeout(() => setTranscriptionStatus(null), 2000);
         }
       }
 
       const prompt = `
-        你是一位【極度挑剔且冷酷】的「驗光臨床技術考官」。你的唯一目標是找出學生操作中的「缺失」。
-        
-        【核心指令：絕對禁止幻覺】：
-        1. 證據門檻：只有在影片中「清晰可見」的手部動作，或「清晰可聞」的完整對話，才能被認定為已執行。
-        2. 疑點利益歸於考官：如果畫面模糊、角度不對、聲音不清楚，一律判定為「未執行」或「缺失」。
-        3. 嚴禁推論：絕對不可因為學生做了 A 動作，就推論他「應該也做了」B 動作。
-        4. 嚴禁腦補：不可將背景雜音或模糊的陰影解讀為特定的操作步驟。
-        
-        【分析流程 - 必須嚴格遵守】：
-        第一步：【原始觀察紀錄】
-        請按時間順序，逐秒列出你「確切看到」的動作與「確切聽到」的對話。
-        格式：[分:秒] 動作描述 / 對話內容。
-        (如果這部分你寫不出來，後面的評分就必須是 0 分)
-
-        第二步：【嚴苛比對】
-        將上述「原始觀察紀錄」與下方的「正確操作要點」進行比對。
-        只要有一點點不符（例如：指令說錯一個字、手勢位置偏離 5 公分、順序顛倒），就必須扣分。
-
-        第三步：【最終裁決】
-        給出評分與回饋。
-
         【學生選擇驗證的步驟與標準】：
         ${selectedSteps.map((title, i) => {
           const step = standardSteps.find(s => s.title === title);
@@ -576,16 +543,7 @@ export default function App() {
         ${url ? `影片連結：${url}` : "影片已隨附於此請求中。"}
         ${actualTranscript ? `【系統提取之原始逐字稿（僅供參考，請以影片實際聽到的為準）】：\n${actualTranscript}\n` : ""}
 
-        請以 JSON 格式回傳，結構如下：
-        {
-          "isCorrect": boolean,
-          "score": number (0-100),
-          "reasoning": "請在此列出你的「原始觀察紀錄」，並說明為什麼這些證據不足以支持學生過關。請特別指出你『沒看到』什麼。",
-          "feedback": "請以嚴厲的口吻指出學生的錯誤，並要求其改進具體細節。",
-          "detectedSteps": ["影片中 100% 確定有做到的步驟名稱"],
-          "missingSteps": ["影片中沒看到、看不清、或做錯的步驟名稱"],
-          "transcript": "請提供你整理後的精確影片紀錄（含時間戳記），若無證據請留空"
-        }
+        請根據上述標準分析影片。
       `;
 
       // Call Backend API with real upload progress
@@ -925,7 +883,7 @@ export default function App() {
                               </div>
                               <div className="bg-white/70 backdrop-blur-md p-8 rounded-[2rem] border border-white/50 shadow-sm">
                                 <p className="text-lg text-zinc-800 leading-relaxed font-bold italic">
-                                  "{result.feedback}"
+                                  "{result.summary}"
                                 </p>
                               </div>
                             </div>
@@ -937,18 +895,17 @@ export default function App() {
                                   驗證影片來源
                                 </h4>
                                 <p className="text-sm font-mono text-zinc-600 truncate bg-white/60 p-3 rounded-xl border border-white/40">
-                                  {url}
+                                  {url || '本地上傳影片'}
                                 </p>
                               </div>
-                              <div className="flex gap-4">
-                                <div className="flex-1 bg-white/60 p-6 rounded-3xl border border-white/40 text-center">
-                                  <p className="text-xs font-bold text-zinc-400 uppercase mb-1">偵測步驟</p>
-                                  <p className="text-2xl font-black text-zinc-900">{result.detectedSteps.length}</p>
-                                </div>
-                                <div className="flex-1 bg-white/60 p-6 rounded-3xl border border-white/40 text-center">
-                                  <p className="text-xs font-bold text-zinc-400 uppercase mb-1">遺漏步驟</p>
-                                  <p className="text-2xl font-black text-red-600">{result.missingSteps.length}</p>
-                                </div>
+                              <div className="bg-indigo-600/5 p-6 rounded-3xl border border-indigo-100">
+                                <h4 className="text-xs font-black text-indigo-600 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                  <UserIcon className="w-4 h-4" />
+                                  助教的溫馨提醒
+                                </h4>
+                                <p className="text-sm text-zinc-700 leading-relaxed font-medium">
+                                  {result.advice}
+                                </p>
                               </div>
                             </div>
                           </div>
@@ -963,10 +920,10 @@ export default function App() {
                               <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center">
                                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                               </div>
-                              影片中偵測到的正確操作
+                              操作優點 (Strengths)
                             </h4>
                             <div className="space-y-4">
-                              {result.detectedSteps.map((step, i) => (
+                              {result.strengths.map((item, i) => (
                                 <motion.div 
                                   initial={{ opacity: 0, x: -10 }}
                                   animate={{ opacity: 1, x: 0 }}
@@ -977,45 +934,38 @@ export default function App() {
                                   <div className="w-6 h-6 rounded-full bg-emerald-500 flex items-center justify-center text-[10px] text-white font-black shadow-lg shadow-emerald-200">
                                     {i + 1}
                                   </div>
-                                  {step}
+                                  {item}
                                 </motion.div>
                               ))}
-                              {result.detectedSteps.length === 0 && (
-                                <div className="text-center py-10 bg-zinc-50 rounded-2xl border border-dashed border-zinc-200">
-                                  <p className="text-zinc-400 font-medium">未偵測到明確的標準步驟</p>
-                                </div>
-                              )}
                             </div>
                           </div>
 
-                          {result.missingSteps.length > 0 && (
-                            <div className="pt-10 border-t border-zinc-100">
-                              <h4 className="text-sm font-black text-zinc-900 uppercase tracking-widest mb-6 flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center">
-                                  <AlertCircle className="w-4 h-4 text-red-600" />
-                                </div>
-                                遺漏或需要改進的環節
-                              </h4>
-                              <div className="space-y-4">
-                                {result.missingSteps.map((step, i) => (
-                                  <motion.div 
-                                    initial={{ opacity: 0, x: -10 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    transition={{ delay: i * 0.1 }}
-                                    key={i} 
-                                    className="flex items-center gap-4 text-base text-red-600 font-bold bg-red-50 p-5 rounded-2xl border border-red-100"
-                                  >
-                                    <div className="w-2 h-2 rounded-full bg-red-500" />
-                                    {step}
-                                  </motion.div>
-                                ))}
+                          <div className="pt-10 border-t border-zinc-100">
+                            <h4 className="text-sm font-black text-zinc-900 uppercase tracking-widest mb-6 flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center">
+                                <AlertCircle className="w-4 h-4 text-red-600" />
                               </div>
+                              改進建議 (Weaknesses)
+                            </h4>
+                            <div className="space-y-4">
+                              {result.weaknesses.map((item, i) => (
+                                <motion.div 
+                                  initial={{ opacity: 0, x: -10 }}
+                                  animate={{ opacity: 1, x: 0 }}
+                                  transition={{ delay: i * 0.1 }}
+                                  key={i} 
+                                  className="flex items-center gap-4 text-base text-red-600 font-bold bg-red-50 p-5 rounded-2xl border border-red-100"
+                                >
+                                  <div className="w-2 h-2 rounded-full bg-red-500" />
+                                  {item}
+                                </motion.div>
+                              ))}
                             </div>
-                          )}
+                          </div>
                         </div>
                       </div>
 
-                      {/* Transcript Sidebar */}
+                      {/* Timeline Sidebar */}
                       <div className="lg:col-span-5">
                         <div className="bg-zinc-900 rounded-[2.5rem] p-10 shadow-2xl h-full flex flex-col border border-zinc-800 relative overflow-hidden">
                           {/* Background Glow */}
@@ -1024,22 +974,20 @@ export default function App() {
                           <div className="flex items-center justify-between mb-6">
                             <div className="flex items-center gap-2">
                               <RefreshCw className="w-4 h-4 text-emerald-400 animate-spin-slow" />
-                              <h4 className="text-xs font-black text-zinc-400 uppercase tracking-widest">影音轉文字紀錄</h4>
+                              <h4 className="text-xs font-black text-zinc-400 uppercase tracking-widest">客觀操作時間軸紀錄</h4>
                             </div>
                             <div className="flex items-center gap-2">
                               <button 
-                                onClick={handleCopyTranscript}
+                                onClick={() => {
+                                  const text = result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
+                                  navigator.clipboard.writeText(text);
+                                  setCopied(true);
+                                  setTimeout(() => setCopied(false), 2000);
+                                }}
                                 className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400 hover:text-white"
-                                title="複製文字"
+                                title="複製紀錄"
                               >
                                 {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
-                              </button>
-                              <button 
-                                onClick={handleDownloadTranscript}
-                                className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400 hover:text-white"
-                                title="下載 .txt"
-                              >
-                                <Download className="w-4 h-4" />
                               </button>
                             </div>
                           </div>
@@ -1049,7 +997,7 @@ export default function App() {
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
                             <input 
                               type="text"
-                              placeholder="搜尋關鍵字..."
+                              placeholder="搜尋紀錄..."
                               value={searchTerm}
                               onChange={(e) => setSearchTerm(e.target.value)}
                               className="w-full bg-zinc-800/50 border border-zinc-700/50 rounded-xl pl-9 pr-4 py-2 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-emerald-500/50 transition-all"
@@ -1057,27 +1005,28 @@ export default function App() {
                           </div>
 
                           <div className="flex-1 bg-zinc-800/30 rounded-2xl p-6 text-sm text-zinc-300 leading-relaxed overflow-y-auto font-mono selection:bg-emerald-500/30 selection:text-white scrollbar-thin scrollbar-thumb-zinc-700">
-                            {result.transcript ? result.transcript.split('\n').filter(line => line.toLowerCase().includes(searchTerm.toLowerCase())).map((line, i) => (
-                              <p key={i} className="mb-2 hover:text-white transition-colors cursor-default group flex gap-3">
-                                <span className="text-zinc-600 select-none group-hover:text-emerald-500/50 transition-colors">
-                                  {line.match(/^\[\d+:\d+\]/) ? line.match(/^\[\d+:\d+\]/)?.[0] : ''}
+                            {result.timeline.filter(item => item.action.toLowerCase().includes(searchTerm.toLowerCase())).map((item, i) => (
+                              <div key={i} className="mb-4 hover:text-white transition-colors cursor-default group flex gap-3">
+                                <span className="text-emerald-500 font-bold select-none whitespace-nowrap">
+                                  [{item.time}]
                                 </span>
-                                <span className="flex-1">
-                                  {line.replace(/^\[\d+:\d+\]\s*/, '')}
+                                <span className="flex-1 text-zinc-300 group-hover:text-white transition-colors">
+                                  {item.action}
                                 </span>
-                              </p>
-                            )) : "無語音紀錄"}
+                              </div>
+                            ))}
+                            {result.timeline.length === 0 && <p className="text-zinc-500 italic">無詳細時間軸紀錄</p>}
                           </div>
                           
                           <div className="mt-6 pt-6 border-t border-zinc-800 flex items-center justify-between">
                             <div className="flex items-center gap-2">
                               <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                               <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-tighter">
-                                影音辨識完成
+                                動作分析完成
                               </p>
                             </div>
                             <p className="text-[10px] text-zinc-600 font-medium">
-                              {result.transcript ? `${result.transcript.length} 字元` : '0 字元'}
+                              共 {result.timeline.length} 筆紀錄
                             </p>
                           </div>
                         </div>

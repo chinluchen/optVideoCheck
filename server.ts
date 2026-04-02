@@ -186,15 +186,49 @@ async function startServer() {
       const ai = new GoogleGenAI({ apiKey });
       
       const systemInstruction = `
-        你是一位專業且親切的台灣「視光系實驗課助教」。
-        請根據影片內容進行評分。
-        
-        回覆規範：
-        1. 語氣：親切、鼓勵，請用「同學你好，我是助教」作為開頭。
-        2. 術語：必須使用台灣常用的視光術語（如：PD、遮蓋測試、視網膜檢影鏡）。
-        3. 結構：指出優點、需要改進的地方、以及最終建議。
-        4. 格式：必須嚴格遵守 JSON 格式回傳，包含 score (0-100) 與 feedback (字串) 欄位。
+        # 角色設定
+        你是一位專業且嚴謹的台灣「視光系臨床實驗課教授」。你的任務是針對學生上傳的驗光操作影片（例如：綜合檢查儀 Phoropter 操作、遮蓋測試等）進行精確的動作紀錄與評分。
+
+        # 核心分析原則（防止幻覺）
+        1. **視覺優先原則**：僅紀錄影片中「肉眼清晰可見」的動作。若畫面模糊或角度受限看不清刻度，必須標註「進行旋鈕調整，具體數值不明」，絕對禁止根據常理推測或編造未發生的動作（例如：未見撤除稜鏡動作，禁止自行補上紀錄）。
+        2. **禁止過度推理**：除非學生在影片中有口頭說明（如：「現在置入稜鏡」），否則請描述「物理動作」（如：「手部轉動上方旋鈕」）而非「功能意圖」。
+        3. **時間軸精確性**：
+           - 每一筆紀錄必須附上精確的時間戳記 [分:秒]。
+           - 你必須完整分析至影片的最後一秒。輸出的最後一筆紀錄必須對應影片結束前的最終畫面，不可在影片中途停止分析。
+        4. **術語規範**：必須使用台灣視光界慣用術語（如：球面度、散光軸度、交叉圓柱鏡 JCC、遮蓋去遮蓋測試）。
+
+        # 任務流程
+        1. **客觀時間軸紀錄**：以條列式列出影片中發生的所有關鍵動作與對話。
+        2. **專業評分**：根據操作規範給予 0-100 的分數。
+        3. **優缺點分析**：指出 2 個優點與 2 個具體改進建議。
+
+        # 輸出格式
+        必須嚴格以 JSON 格式回傳，結構如下：
+        {
+          "score": number,
+          "summary": "總結評價",
+          "timeline": [
+            {"time": "mm:ss", "action": "動作描述"}
+          ],
+          "strengths": ["優點1", "優點2"],
+          "weaknesses": ["改進點1", "改進點2"],
+          "advice": "給學生的親切溫馨提醒"
+        }
+
+        # 語氣要求
+        回覆口氣要親切、專業且具備指導意義。請以「同學你好，我是助教，我已經看完你的操作影片了」作為開頭（放在 advice 或 summary 中）。
       `;
+
+      let durationSeconds: number | null = null;
+      if (videoUrl && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'))) {
+        try {
+          const info = await ytdl.getBasicInfo(videoUrl);
+          durationSeconds = parseInt(info.videoDetails.lengthSeconds);
+          console.log(`偵測到 YouTube 影片長度: ${durationSeconds} 秒`);
+        } catch (e) {
+          console.warn("YouTube 影片長度偵測失敗:", e);
+        }
+      }
 
       let contents: any;
 
@@ -212,6 +246,20 @@ async function startServer() {
           
           const stats = fs.statSync(tempFilePath);
           console.log(`暫存檔案已建立: ${tempFilePath}, 大小: ${stats.size} bytes`);
+
+          // 偵測本地影片長度
+          try {
+            const metadata: any = await new Promise((resolve, reject) => {
+              ffmpeg.ffprobe(tempFilePath!, (err, data) => {
+                if (err) reject(err);
+                else resolve(data);
+              });
+            });
+            durationSeconds = Math.round(metadata.format.duration);
+            console.log(`偵測到本地影片長度: ${durationSeconds} 秒`);
+          } catch (e) {
+            console.warn("本地影片長度偵測失敗:", e);
+          }
           
           console.log("正在上傳至 Gemini File API...");
           let uploadResult;
@@ -257,14 +305,19 @@ async function startServer() {
         contents = [{ text: prompt }];
       }
 
+      const finalPrompt = `
+        ${prompt}
+        ${durationSeconds ? `【影片資訊】：本影片總長度為 ${durationSeconds} 秒。請務必分析至最後一秒，並在 timeline 中紀錄最後的動作。` : ""}
+      `;
+
       // 執行分析 - 使用正確的 ai.models.generateContent 模式
       const result = await ai.models.generateContent({
         model: "gemini-3-flash-preview", // 使用推薦的穩定版
-        contents: [{ role: "user", parts: contents }],
+        contents: [{ role: "user", parts: [...(Array.isArray(contents) ? contents : [contents]), { text: finalPrompt }] }],
         config: { 
           systemInstruction,
           responseMimeType: "application/json", 
-          temperature: 0.1 // 調低溫度讓 AI 回覆格式更穩定
+          temperature: 0 // 設為 0 以追求最高精確度
         }
       });
 
