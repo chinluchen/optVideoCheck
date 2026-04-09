@@ -34,6 +34,7 @@
     "react-firebase-hooks": "^5.1.1",
     "tsx": "^4.21.0",
     "vite": "^6.2.0",
+    "xlsx": "^0.18.5",
     "youtube-transcript": "^1.2.1",
     "ytdl-core": "^4.11.5"
   },

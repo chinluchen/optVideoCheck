@@ -295,6 +295,45 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  app.post("/api/students/bulk", async (req, res) => {
+    const { students } = req.body;
+    if (!Array.isArray(students)) {
+      return res.status(400).json({ error: "Invalid data format" });
+    }
+
+    const batch = firestore.batch();
+    const results = { success: 0, skipped: 0, errors: [] as string[] };
+
+    for (const student of students) {
+      const { username, password } = student;
+      if (!username || !password) {
+        results.errors.push(`Missing data for student: ${JSON.stringify(student)}`);
+        continue;
+      }
+
+      const exists = await firestore.collection('users').where('username', '==', username).limit(1).get();
+      if (!exists.empty) {
+        results.skipped++;
+        continue;
+      }
+
+      const newDocRef = firestore.collection('users').doc();
+      batch.set(newDocRef, {
+        username,
+        password,
+        role: 'student',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      results.success++;
+    }
+
+    if (results.success > 0) {
+      await batch.commit();
+    }
+
+    res.json(results);
+  });
+
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok", database: "firestore" });
   });

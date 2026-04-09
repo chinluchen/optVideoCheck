@@ -49,6 +49,7 @@ import {
   useSortable
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import * as XLSX from 'xlsx';
 
 // Firebase imports removed - now using Cloud Run Backend API
 // import { auth, db, storage } from './firebase';
@@ -564,6 +565,55 @@ export default function App() {
     }
   };
 
+  const handleBatchImport = async (file: File) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        let students: { username: string, password: string }[] = [];
+        const data = e.target?.result;
+        
+        if (file.name.endsWith('.json')) {
+          students = JSON.parse(data as string);
+        } else if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+          const workbook = XLSX.read(data, { type: 'binary' });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const json = XLSX.utils.sheet_to_json(worksheet);
+          // Map excel columns to expected format
+          // Expecting columns like "username", "password" or "帳號", "密碼"
+          students = json.map((row: any) => ({
+            username: (row.username || row.帳號 || row.學號 || '').toString(),
+            password: (row.password || row.密碼 || '').toString()
+          })).filter(s => s.username && s.password);
+        }
+
+        if (students.length === 0) {
+          alert("找不到有效的學生資料。請確保檔案格式正確（包含 username/帳號 與 password/密碼 欄位）。");
+          return;
+        }
+
+        const res = await fetch('/api/students/bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ students })
+        });
+
+        const result = await res.json();
+        alert(`匯入完成！\n成功：${result.success}\n略過（重複）：${result.skipped}\n錯誤：${result.errors.length}`);
+        fetchStudents();
+      } catch (err) {
+        console.error("Batch import failed:", err);
+        alert("匯入失敗，請檢查檔案格式。");
+      }
+    };
+
+    if (file.name.endsWith('.json')) {
+      reader.readAsText(file);
+    } else {
+      reader.readAsBinaryString(file);
+    }
+  };
+
   const handleVerify = async () => {
     if (!user) {
       setError('請先登入系統');
@@ -854,7 +904,10 @@ export default function App() {
           {/* Header */}
           <header className="bg-white border-b border-zinc-200 sticky top-0 z-10">
             <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
-              <div className="flex items-center gap-2">
+              <div 
+                className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity"
+                onClick={() => setView('student')}
+              >
                 <div className="bg-indigo-600 p-1.5 rounded-lg">
                   <Glasses className="w-5 h-5 text-white" />
                 </div>
@@ -1128,6 +1181,39 @@ export default function App() {
                         </button>
                       </div>
                     </form>
+                  </div>
+
+                  <div className="bg-white rounded-[2.5rem] border border-zinc-200 shadow-sm p-8 space-y-6">
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600">
+                        <Upload className="w-5 h-5" />
+                      </div>
+                      <h3 className="font-black text-zinc-900">批量匯入學生</h3>
+                    </div>
+                    <p className="text-xs text-zinc-500 leading-relaxed">
+                      支援 JSON 或 Excel (.xlsx, .xls) 檔案匯入。請確保欄位包含「帳號/username」與「密碼/password」。
+                    </p>
+                    <div className="relative">
+                      <input 
+                        type="file" 
+                        accept=".json,.xlsx,.xls"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) handleBatchImport(file);
+                        }}
+                        className="hidden" 
+                        id="batch-import-input"
+                      />
+                      <label 
+                        htmlFor="batch-import-input"
+                        className="w-full flex items-center justify-center gap-2 bg-zinc-50 border-2 border-dashed border-zinc-200 hover:border-indigo-400 hover:bg-indigo-50 py-8 rounded-2xl cursor-pointer transition-all group"
+                      >
+                        <div className="text-center">
+                          <PlusCircle className="w-6 h-6 text-zinc-300 group-hover:text-indigo-600 mx-auto mb-2" />
+                          <span className="text-sm font-bold text-zinc-500 group-hover:text-indigo-600">選擇檔案匯入</span>
+                        </div>
+                      </label>
+                    </div>
                   </div>
                 </div>
 
