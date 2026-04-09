@@ -24,7 +24,12 @@ import {
   LogIn,
   User as UserIcon,
   FileVideo,
-  History
+  History,
+  Users,
+  Settings,
+  LayoutDashboard,
+  ChevronRight,
+  UserPlus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -218,10 +223,11 @@ const SortableStepItem: React.FC<SortableStepItemProps> = ({
 };
 
 export default function App() {
-  const [view, setView] = useState<'student' | 'teacher' | 'history'>('student');
-  const [user, setUser] = useState<{uid: string, displayName: string, role: 'student' | 'teacher', isGuest?: boolean} | null>(null);
-  const [userRole, setUserRole] = useState<'student' | 'teacher' | null>(null);
+  const [view, setView] = useState<'student' | 'teacher' | 'history' | 'admin-dashboard' | 'admin-users' | 'admin-steps'>('student');
+  const [user, setUser] = useState<{uid: string, displayName: string, role: 'student' | 'teacher' | 'admin', isGuest?: boolean} | null>(null);
+  const [userRole, setUserRole] = useState<'student' | 'teacher' | 'admin' | null>(null);
   const [isTeacherLoggedIn, setIsTeacherLoggedIn] = useState(false);
+  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -240,6 +246,10 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [submissions, setSubmissions] = useState<any[]>([]);
   const [transcriptionStatus, setTranscriptionStatus] = useState<string | null>(null);
+  const [students, setStudents] = useState<any[]>([]);
+  const [newStudentUsername, setNewStudentUsername] = useState('');
+  const [newStudentPassword, setNewStudentPassword] = useState('');
+  const [editingStudentId, setEditingStudentId] = useState<number | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -251,21 +261,46 @@ export default function App() {
       const parsedUser = JSON.parse(savedUser);
       setUser(parsedUser);
       setUserRole(parsedUser.role);
+      if (parsedUser.role === 'admin') {
+        setIsAdminLoggedIn(true);
+        setView('admin-dashboard');
+      }
     }
   }, []);
 
   // Sync steps from Backend
-  useEffect(() => {
-    const fetchSteps = async () => {
-      try {
-        const res = await fetch('/api/health'); // Just checking connection
-        // In a real app, we'd have a /api/config endpoint
-      } catch (err) {
-        console.error("Backend connection failed:", err);
+  const fetchSteps = async () => {
+    try {
+      const res = await fetch('/api/steps');
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        setStandardSteps(data);
+        setSelectedSteps(data.map((s: any) => s.title));
       }
-    };
+    } catch (err) {
+      console.error("Failed to fetch steps:", err);
+    }
+  };
+
+  useEffect(() => {
     fetchSteps();
   }, []);
+
+  const fetchStudents = async () => {
+    try {
+      const res = await fetch('/api/students');
+      const data = await res.json();
+      setStudents(data);
+    } catch (err) {
+      console.error("Failed to fetch students:", err);
+    }
+  };
+
+  useEffect(() => {
+    if (isAdminLoggedIn) {
+      fetchStudents();
+    }
+  }, [isAdminLoggedIn]);
 
   // Fetch submissions from Backend
   useEffect(() => {
@@ -313,14 +348,6 @@ export default function App() {
     setUser(guestUser);
     setUserRole(role);
     localStorage.setItem('app_user', JSON.stringify(guestUser));
-  };
-
-  const handleLogout = async () => {
-    setUser(null);
-    setUserRole(null);
-    localStorage.removeItem('app_user');
-    setIsTeacherLoggedIn(false);
-    setView('student');
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -427,13 +454,111 @@ export default function App() {
     if (editingStepIndex === index) setEditingStepIndex(null);
   };
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (loginUsername === 'teacher' && loginPassword === 'student') {
-      setIsTeacherLoggedIn(true);
-      setLoginError('');
-    } else {
-      setLoginError('帳號或密碼錯誤');
+    setLoginError('');
+
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loginUsername, password: loginPassword })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        const loggedInUser = data.user;
+        setUser(loggedInUser);
+        setUserRole(loggedInUser.role);
+        localStorage.setItem('app_user', JSON.stringify(loggedInUser));
+        
+        if (loggedInUser.role === 'admin') {
+          setIsAdminLoggedIn(true);
+          setView('admin-dashboard');
+        } else if (loggedInUser.role === 'teacher') {
+          setIsTeacherLoggedIn(true);
+          setView('student');
+        } else {
+          setView('student');
+        }
+        
+        setIsLoginDropdownOpen(false);
+        setLoginUsername('');
+        setLoginPassword('');
+      } else {
+        setLoginError(data.error || '帳號或密碼錯誤');
+      }
+    } catch (err) {
+      console.error("Login failed:", err);
+      setLoginError('連線失敗，請稍後再試');
+    }
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    setUserRole(null);
+    setIsTeacherLoggedIn(false);
+    setIsAdminLoggedIn(false);
+    localStorage.removeItem('app_user');
+    setView('student');
+  };
+
+  const saveStep = async (step: Step) => {
+    try {
+      await fetch('/api/steps', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(step)
+      });
+      fetchSteps();
+    } catch (err) {
+      console.error("Failed to save step:", err);
+    }
+  };
+
+  const deleteStepFromBackend = async (id: string) => {
+    try {
+      await fetch(`/api/steps/${id}`, { method: 'DELETE' });
+      fetchSteps();
+    } catch (err) {
+      console.error("Failed to delete step:", err);
+    }
+  };
+
+  const handleAddStudent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newStudentUsername || !newStudentPassword) return;
+
+    try {
+      const res = await fetch('/api/students', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          id: editingStudentId,
+          username: newStudentUsername, 
+          password: newStudentPassword 
+        })
+      });
+      if (res.ok) {
+        setNewStudentUsername('');
+        setNewStudentPassword('');
+        setEditingStudentId(null);
+        fetchStudents();
+      } else {
+        const data = await res.json();
+        alert(data.error || "儲存失敗");
+      }
+    } catch (err) {
+      console.error("Failed to add student:", err);
+    }
+  };
+
+  const handleDeleteStudent = async (id: number) => {
+    if (!confirm('確定要刪除此學生帳號嗎？')) return;
+    try {
+      await fetch(`/api/students/${id}`, { method: 'DELETE' });
+      fetchStudents();
+    } catch (err) {
+      console.error("Failed to delete student:", err);
     }
   };
 
@@ -646,6 +771,14 @@ export default function App() {
             <h1 className="font-bold text-xl tracking-tight text-zinc-900">驗光實驗步驟驗證系統</h1>
           </div>
           <div className="flex items-center gap-1 bg-zinc-100 p-1 rounded-xl">
+            {(isAdminLoggedIn || userRole === 'admin') && (
+              <button 
+                onClick={() => setView('admin-dashboard')}
+                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view.startsWith('admin-') ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+              >
+                管理後台
+              </button>
+            )}
             <button 
               onClick={() => setView('student')}
               className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'student' ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
@@ -658,19 +791,22 @@ export default function App() {
             >
               歷史紀錄
             </button>
-            <button 
-              onClick={() => {
-                setView('teacher');
-                if (!isTeacherLoggedIn && userRole !== 'teacher') {
-                  setLoginUsername('');
-                  setLoginPassword('');
-                  setLoginError('');
-                }
-              }}
-              className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'teacher' ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-            >
-              教師後台
-            </button>
+            {(!isAdminLoggedIn && userRole !== 'admin') && (
+              <button 
+                onClick={() => {
+                  setView('teacher');
+                  if (!isTeacherLoggedIn && userRole !== 'teacher') {
+                    setLoginUsername('');
+                    setLoginPassword('');
+                    setLoginError('');
+                    setIsLoginDropdownOpen(true);
+                  }
+                }}
+                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'teacher' ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+              >
+                教師後台
+              </button>
+            )}
           </div>
           
           <div className="flex items-center gap-4 ml-4 pl-4 border-l border-zinc-200 relative">
@@ -679,7 +815,7 @@ export default function App() {
                 <div className="text-right hidden sm:block">
                   <p className="text-xs font-bold text-zinc-900">{user.displayName}</p>
                   <p className="text-[10px] text-zinc-500 uppercase tracking-widest">
-                    {userRole === 'teacher' ? '教師' : '學生'}
+                    {userRole === 'admin' ? '系統管理員' : userRole === 'teacher' ? '教師' : '學生'}
                     {user.isAnonymous && ' (訪客模式)'}
                   </p>
                 </div>
@@ -709,24 +845,43 @@ export default function App() {
                         initial={{ opacity: 0, y: 10, scale: 0.95 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                        className="absolute right-0 top-full mt-2 w-64 bg-white border border-zinc-200 rounded-2xl shadow-2xl z-30 overflow-hidden p-2"
+                        className="absolute right-0 top-full mt-2 w-72 bg-white border border-zinc-200 rounded-2xl shadow-2xl z-30 overflow-hidden p-6 space-y-6"
                       >
-                        <button 
-                          onClick={() => { handleGoogleLogin(); setIsLoginDropdownOpen(false); }}
-                          className="w-full flex items-center gap-3 p-3 hover:bg-zinc-50 rounded-xl transition-all text-left group"
-                        >
-                          <div className="w-8 h-8 bg-white border border-zinc-200 rounded-lg flex items-center justify-center group-hover:border-indigo-300">
-                            <Youtube className="w-4 h-4 text-red-600" />
+                        <div className="text-center space-y-1">
+                          <h3 className="text-lg font-black text-zinc-900">系統登入</h3>
+                          <p className="text-xs text-zinc-500 font-medium">請輸入您的帳號與密碼</p>
+                        </div>
+                        <form onSubmit={handleLogin} className="space-y-4">
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">帳號</label>
+                            <input 
+                              type="text" 
+                              value={loginUsername}
+                              onChange={(e) => setLoginUsername(e.target.value)}
+                              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium"
+                              placeholder="請輸入帳號"
+                            />
                           </div>
-                          <div>
-                            <p className="text-xs font-bold text-zinc-900">Google 帳號登入</p>
-                            <p className="text-[10px] text-zinc-400">使用正式帳號</p>
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">密碼</label>
+                            <input 
+                              type="password" 
+                              value={loginPassword}
+                              onChange={(e) => setLoginPassword(e.target.value)}
+                              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium"
+                              placeholder="••••"
+                            />
                           </div>
-                        </button>
+                          {loginError && <p className="text-[10px] text-red-500 font-bold text-center">{loginError}</p>}
+                          <button 
+                            type="submit"
+                            className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold text-sm shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95"
+                          >
+                            登入
+                          </button>
+                        </form>
                         
                         <div className="h-px bg-zinc-100 my-2" />
-                        
-                        <p className="px-3 py-1 text-[10px] font-black text-zinc-400 uppercase tracking-widest">安全性測試模式</p>
                         
                         <button 
                           onClick={() => { handleGuestLogin('student'); setIsLoginDropdownOpen(false); }}
@@ -738,19 +893,6 @@ export default function App() {
                           <div>
                             <p className="text-xs font-bold text-indigo-900">訪客測試 (學生)</p>
                             <p className="text-[10px] text-indigo-400">無需帳號，僅供測試</p>
-                          </div>
-                        </button>
-                        
-                        <button 
-                          onClick={() => { handleGuestLogin('teacher'); setIsLoginDropdownOpen(false); }}
-                          className="w-full flex items-center gap-3 p-3 hover:bg-emerald-50 rounded-xl transition-all text-left group"
-                        >
-                          <div className="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center text-emerald-600">
-                            <ShieldCheck className="w-4 h-4" />
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-emerald-900">訪客測試 (教師)</p>
-                            <p className="text-[10px] text-emerald-400">測試管理後台功能</p>
                           </div>
                         </button>
                       </motion.div>
@@ -765,7 +907,276 @@ export default function App() {
 
       <main className="max-w-5xl mx-auto px-6 pt-12">
         <AnimatePresence mode="wait">
-          {view === 'student' ? (
+          {view === 'admin-dashboard' ? (
+            <motion.div 
+              key="admin-dashboard"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="max-w-4xl mx-auto pt-10 space-y-12"
+            >
+              <div className="text-center space-y-4 mb-12">
+                <div className="inline-flex items-center justify-center w-20 h-20 bg-indigo-50 rounded-3xl mb-4">
+                  <LayoutDashboard className="w-10 h-10 text-indigo-600" />
+                </div>
+                <h2 className="text-4xl font-black text-zinc-900 tracking-tight">管理員主控台</h2>
+                <p className="text-zinc-500 max-w-md mx-auto leading-relaxed text-lg">
+                  歡迎回來，管理員。請選擇您要進行的管理功能。
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <button 
+                  onClick={() => setView('admin-steps')}
+                  className="group bg-white p-10 rounded-[3rem] border border-zinc-200 shadow-sm hover:shadow-xl hover:border-indigo-500 transition-all text-left space-y-6"
+                >
+                  <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                    <Settings className="w-8 h-8" />
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-black text-zinc-900 mb-2">功能一：編輯影片邏輯與答案</h3>
+                    <p className="text-zinc-500 text-sm leading-relaxed">
+                      自定義實驗步驟、設定正確答案基準，以及調整 AI 評分邏輯。
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 text-indigo-600 font-bold text-sm">
+                    進入管理 <ChevronRight className="w-4 h-4" />
+                  </div>
+                </button>
+
+                <button 
+                  onClick={() => setView('admin-users')}
+                  className="group bg-white p-10 rounded-[3rem] border border-zinc-200 shadow-sm hover:shadow-xl hover:border-indigo-500 transition-all text-left space-y-6"
+                >
+                  <div className="w-16 h-16 bg-emerald-50 rounded-2xl flex items-center justify-center text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white transition-colors">
+                    <Users className="w-8 h-8" />
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-black text-zinc-900 mb-2">功能二：管理學生名單帳號</h3>
+                    <p className="text-zinc-500 text-sm leading-relaxed">
+                      創建、編輯或刪除學生帳號，設定專屬的登入密碼。
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 text-emerald-600 font-bold text-sm">
+                    進入管理 <ChevronRight className="w-4 h-4" />
+                  </div>
+                </button>
+              </div>
+            </motion.div>
+          ) : view === 'admin-steps' ? (
+            <motion.div 
+              key="admin-steps"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="max-w-4xl mx-auto pt-10 space-y-8"
+            >
+              <div className="flex items-center justify-between">
+                <button onClick={() => setView('admin-dashboard')} className="flex items-center gap-2 text-zinc-500 hover:text-zinc-900 font-bold transition-colors">
+                  <ArrowRight className="w-4 h-4 rotate-180" /> 返回主控台
+                </button>
+                <h2 className="text-2xl font-black text-zinc-900">實驗步驟與答案管理</h2>
+              </div>
+
+              <div className="bg-white rounded-[2.5rem] border border-zinc-200 shadow-sm overflow-hidden">
+                <div className="p-8 border-b border-zinc-100 flex items-center justify-between bg-zinc-50/50">
+                  <div>
+                    <h3 className="font-black text-zinc-900">標準操作步驟列表</h3>
+                    <p className="text-xs text-zinc-500 font-medium">拖曳可調整順序，點擊可編輯內容</p>
+                  </div>
+                  <button 
+                    onClick={addNewStep}
+                    className="flex items-center gap-2 bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
+                  >
+                    <Plus className="w-4 h-4" /> 新增步驟
+                  </button>
+                </div>
+
+                <div className="p-8">
+                  <DndContext 
+                    sensors={sensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={handleDragEnd}
+                  >
+                    <SortableContext 
+                      items={standardSteps.map(s => s.id)}
+                      strategy={verticalListSortingStrategy}
+                    >
+                      <div className="space-y-4">
+                        {standardSteps.map((step, index) => (
+                          <SortableStepItem 
+                            key={step.id} 
+                            step={step} 
+                            index={index}
+                            isEditing={editingStepIndex === index}
+                            onToggle={() => setEditingStepIndex(editingStepIndex === index ? null : index)}
+                            onUpdateTitle={(title) => {
+                              const newSteps = [...standardSteps];
+                              newSteps[index].title = title;
+                              setStandardSteps(newSteps);
+                            }}
+                            onUpdateAnswer={(answer) => {
+                              const newSteps = [...standardSteps];
+                              newSteps[index].correctAnswer = answer;
+                              setStandardSteps(newSteps);
+                            }}
+                            onDelete={() => {
+                              if (confirm('確定要刪除此步驟嗎？')) {
+                                deleteStepFromBackend(step.id);
+                              }
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </SortableContext>
+                  </DndContext>
+                </div>
+
+                <div className="p-8 bg-zinc-50 border-t border-zinc-100 flex justify-end gap-4">
+                  <button 
+                    onClick={() => {
+                      standardSteps.forEach(saveStep);
+                      alert('所有變更已儲存至資料庫');
+                    }}
+                    className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-bold text-sm shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all"
+                  >
+                    儲存所有變更
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          ) : view === 'admin-users' ? (
+            <motion.div 
+              key="admin-users"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="max-w-4xl mx-auto pt-10 space-y-8"
+            >
+              <div className="flex items-center justify-between">
+                <button onClick={() => setView('admin-dashboard')} className="flex items-center gap-2 text-zinc-500 hover:text-zinc-900 font-bold transition-colors">
+                  <ArrowRight className="w-4 h-4 rotate-180" /> 返回主控台
+                </button>
+                <h2 className="text-2xl font-black text-zinc-900">學生帳號名單管理</h2>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-1">
+                  <div className="bg-white rounded-[2.5rem] border border-zinc-200 shadow-sm p-8 space-y-6 sticky top-24">
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center text-emerald-600">
+                        <UserPlus className="w-5 h-5" />
+                      </div>
+                      <h3 className="font-black text-zinc-900">{editingStudentId ? '編輯學生帳號' : '創建新學生帳號'}</h3>
+                    </div>
+                    
+                    <form onSubmit={handleAddStudent} className="space-y-4">
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">學生帳號 (學號)</label>
+                        <input 
+                          type="text" 
+                          value={newStudentUsername}
+                          onChange={(e) => setNewStudentUsername(e.target.value)}
+                          className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all font-medium"
+                          placeholder="例如：S112001"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">登入密碼</label>
+                        <input 
+                          type="text" 
+                          value={newStudentPassword}
+                          onChange={(e) => setNewStudentPassword(e.target.value)}
+                          className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all font-medium"
+                          placeholder="設定密碼"
+                        />
+                      </div>
+                      <div className="flex gap-2">
+                        {editingStudentId && (
+                          <button 
+                            type="button"
+                            onClick={() => {
+                              setEditingStudentId(null);
+                              setNewStudentUsername('');
+                              setNewStudentPassword('');
+                            }}
+                            className="flex-1 bg-zinc-100 text-zinc-600 py-3.5 rounded-xl font-bold text-sm hover:bg-zinc-200 transition-all"
+                          >
+                            取消
+                          </button>
+                        )}
+                        <button 
+                          type="submit"
+                          className="flex-[2] bg-emerald-600 text-white py-3.5 rounded-xl font-bold text-sm shadow-lg shadow-emerald-100 hover:bg-emerald-700 transition-all active:scale-95"
+                        >
+                          {editingStudentId ? '更新帳號' : '創建帳號'}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-2">
+                  <div className="bg-white rounded-[2.5rem] border border-zinc-200 shadow-sm overflow-hidden">
+                    <div className="p-8 border-b border-zinc-100 bg-zinc-50/50 flex items-center justify-between">
+                      <h3 className="font-black text-zinc-900">現有學生名單 ({students.length})</h3>
+                      <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400" />
+                        <input 
+                          type="text"
+                          placeholder="搜尋學生..."
+                          className="pl-9 pr-4 py-2 bg-white border border-zinc-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/10"
+                        />
+                      </div>
+                    </div>
+                    <div className="divide-y divide-zinc-100">
+                      {students.map((student) => (
+                        <div key={student.id} className="p-6 flex items-center justify-between hover:bg-zinc-50 transition-colors group">
+                          <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 rounded-full bg-zinc-100 flex items-center justify-center text-zinc-400 group-hover:bg-emerald-100 group-hover:text-emerald-600 transition-colors">
+                              <UserIcon className="w-5 h-5" />
+                            </div>
+                            <div>
+                              <p className="font-bold text-zinc-900">{student.username}</p>
+                              <p className="text-[10px] text-zinc-400 font-medium">密碼：{student.password}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button 
+                              onClick={() => {
+                                setEditingStudentId(student.id);
+                                setNewStudentUsername(student.username);
+                                setNewStudentPassword(student.password);
+                              }}
+                              className="p-2 hover:bg-indigo-50 rounded-lg text-zinc-400 hover:text-indigo-600 transition-colors"
+                              title="編輯"
+                            >
+                              <Settings className="w-4 h-4" />
+                            </button>
+                            <button 
+                              onClick={() => handleDeleteStudent(student.id)}
+                              className="p-2 hover:bg-red-50 rounded-lg text-zinc-400 hover:text-red-500 transition-colors"
+                              title="刪除"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {students.length === 0 && (
+                        <div className="p-20 text-center space-y-4">
+                          <div className="w-16 h-16 bg-zinc-50 rounded-full flex items-center justify-center mx-auto text-zinc-300">
+                            <Users className="w-8 h-8" />
+                          </div>
+                          <p className="text-zinc-400 font-medium">目前尚無學生帳號</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          ) : view === 'student' ? (
             <motion.div 
               key="student-view"
               initial={{ opacity: 0, y: 20 }}

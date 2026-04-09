@@ -47,7 +47,47 @@ db.exec(`
     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
     updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password TEXT,
+    role TEXT DEFAULT 'student',
+    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS steps (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    correctAnswer TEXT,
+    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
+
+// Seed default admin and steps
+const seedData = () => {
+  const adminExists = db.prepare("SELECT * FROM users WHERE username = 'admin'").get();
+  if (!adminExists) {
+    db.prepare("INSERT INTO users (username, password, role) VALUES (?, ?, ?)").run('admin', '0322', 'admin');
+  }
+
+  const stepsCount = db.prepare("SELECT COUNT(*) as count FROM steps").get() as { count: number };
+  if (stepsCount.count === 0) {
+    const defaultSteps = [
+      { id: "1", title: "消毒雙手與儀器 (Sanitization)", correctAnswer: "操作者應使用 75% 酒精徹底消毒雙手，並擦拭驗光儀器之額托與下巴托。" },
+      { id: "2", title: "調整受檢者坐姿與下巴托 (Patient Positioning)", correctAnswer: "受檢者應坐穩，下巴靠在托架上，額頭緊貼額托，調整高度使受檢者眼睛對準儀器刻度。" },
+      { id: "3", title: "電腦驗光 (Auto-Refraction)", correctAnswer: "操作者應指示受檢者注視儀器內的熱氣球或目標，並在對焦準確後進行至少三次測量。" },
+      { id: "4", title: "自覺式驗光 - 霧視法 (Subjective Refraction - Fogging)", correctAnswer: "在進行自覺式驗光前，應先加入正度數鏡片使視力模糊（霧視），以放鬆調節力。" },
+      { id: "5", title: "紅綠測試 (Red-Green Test)", correctAnswer: "受檢者應比較紅綠背景下的視標清晰度，若綠色較清楚則減少負度數，若紅色較清楚則增加負度數。" },
+      { id: "6", title: "散光軸度與度數調整 (Cross Cylinder Adjustment)", correctAnswer: "使用交叉圓柱鏡 (JCC) 進行精確的散光軸度與度數調整，根據受檢者反應旋轉軸度。" },
+      { id: "7", title: "雙眼平衡 (Binocular Balance)", correctAnswer: "使用稜鏡分離法或霧視法，確保雙眼在看遠時的調節狀態一致且平衡。" },
+      { id: "8", title: "試戴與最終處方確認 (Final Prescription Confirmation)", correctAnswer: "讓受檢者戴上試鏡架行走，確認是否有晃動感、頭暈或不適，並進行最終度數微調。" }
+    ];
+    const insertStep = db.prepare("INSERT INTO steps (id, title, correctAnswer) VALUES (?, ?, ?)");
+    defaultSteps.forEach(s => insertStep.run(s.id, s.title, s.correctAnswer));
+  }
+};
+seedData();
 
 const transcriptionQueue = new PQueue({ concurrency: 2 });
 let openaiClient: OpenAI | null = null;
@@ -132,6 +172,70 @@ async function startServer() {
   });
 
   // API Routes
+  app.post("/api/login", (req, res) => {
+    const { username, password } = req.body;
+    const user = db.prepare("SELECT * FROM users WHERE username = ? AND password = ?").get(username, password) as any;
+    if (user) {
+      res.json({ 
+        success: true, 
+        user: { 
+          uid: user.id.toString(),
+          displayName: user.username, 
+          role: user.role 
+        } 
+      });
+    } else {
+      res.status(401).json({ error: "帳號或密碼錯誤" });
+    }
+  });
+
+  // Steps Management
+  app.get("/api/steps", (req, res) => {
+    const steps = db.prepare("SELECT * FROM steps ORDER BY createdAt ASC").all();
+    res.json(steps);
+  });
+
+  app.post("/api/steps", (req, res) => {
+    const { id, title, correctAnswer } = req.body;
+    const exists = db.prepare("SELECT id FROM steps WHERE id = ?").get(id);
+    if (exists) {
+      db.prepare("UPDATE steps SET title = ?, correctAnswer = ? WHERE id = ?").run(title, correctAnswer, id);
+    } else {
+      db.prepare("INSERT INTO steps (id, title, correctAnswer) VALUES (?, ?, ?)").run(id || randomUUID(), title, correctAnswer);
+    }
+    res.json({ success: true });
+  });
+
+  app.delete("/api/steps/:id", (req, res) => {
+    db.prepare("DELETE FROM steps WHERE id = ?").run(req.params.id);
+    res.json({ success: true });
+  });
+
+  // Students Management
+  app.get("/api/students", (req, res) => {
+    const students = db.prepare("SELECT id, username, password, createdAt FROM users WHERE role = 'student' ORDER BY createdAt DESC").all();
+    res.json(students);
+  });
+
+  app.post("/api/students", (req, res) => {
+    const { id, username, password } = req.body;
+    if (id) {
+      db.prepare("UPDATE users SET username = ?, password = ? WHERE id = ?").run(username, password, id);
+    } else {
+      try {
+        db.prepare("INSERT INTO users (username, password, role) VALUES (?, ?, 'student')").run(username, password);
+      } catch (e: any) {
+        return res.status(400).json({ error: "帳號已存在" });
+      }
+    }
+    res.json({ success: true });
+  });
+
+  app.delete("/api/students/:id", (req, res) => {
+    db.prepare("DELETE FROM users WHERE id = ?").run(req.params.id);
+    res.json({ success: true });
+  });
+
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok", database: "sqlite" });
   });
