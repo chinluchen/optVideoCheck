@@ -2,56 +2,71 @@
   "entities": {
     "User": {
       "title": "User",
-      "description": "User profile information",
+      "description": "System users including admins and students",
       "type": "object",
       "properties": {
-        "uid": { "type": "string" },
-        "email": { "type": "string", "format": "email" },
-        "displayName": { "type": "string" },
-        "role": { "type": "string", "enum": ["student", "teacher"] },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "username": { "type": "string", "description": "Unique login name" },
+        "password": { "type": "string", "description": "Login password" },
+        "role": { "type": "string", "enum": ["admin", "student"], "description": "User role" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Account creation time" }
       },
-      "required": ["uid", "email", "role"]
+      "required": ["username", "password", "role"]
     },
     "Step": {
       "title": "Step",
-      "description": "A single experimental step",
+      "description": "Standard operating steps for optometry experiments",
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "title": { "type": "string" },
-        "correctAnswer": { "type": "string" },
-        "order": { "type": "integer" }
+        "title": { "type": "string", "description": "Step title" },
+        "correctAnswer": { "type": "string", "description": "Correct description/answer for the step" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation time" }
       },
-      "required": ["id", "title", "correctAnswer", "order"]
+      "required": ["title", "correctAnswer"]
     },
-    "VideoSubmission": {
-      "title": "VideoSubmission",
-      "description": "A student's video submission and its analysis",
+    "Submission": {
+      "title": "Submission",
+      "description": "Student video submission and AI analysis results",
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "studentUid": { "type": "string" },
-        "videoUrl": { "type": "string" },
-        "status": { "type": "string", "enum": ["pending", "processing", "completed", "failed"] },
-        "result": { "type": "object" },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "studentName": { "type": "string", "description": "Name of the student" },
+        "videoUrl": { "type": "string", "description": "URL of the submitted video" },
+        "score": { "type": "number", "description": "AI generated score" },
+        "result": { "type": "object", "description": "Detailed AI analysis JSON" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Submission time" }
       },
-      "required": ["id", "studentUid", "videoUrl", "status", "createdAt"]
+      "required": ["studentName", "videoUrl", "score", "result"]
+    },
+    "Transcription": {
+      "title": "Transcription",
+      "description": "Video transcription status and results",
+      "type": "object",
+      "properties": {
+        "videoUrl": { "type": "string", "description": "URL of the video" },
+        "status": { "type": "string", "enum": ["pending", "processing", "completed", "failed"], "description": "Current status" },
+        "transcript": { "type": "string", "description": "Transcribed text" },
+        "error": { "type": "string", "description": "Error message if failed" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation time" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last update time" }
+      },
+      "required": ["videoUrl", "status"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
-      "description": "User profiles"
+      "description": "Collection of users"
     },
-    "/config/standardSteps": {
-      "schema": "object",
-      "description": "The current standard steps configuration"
+    "/steps/{stepId}": {
+      "schema": "Step",
+      "description": "Collection of experiment steps"
     },
     "/submissions/{submissionId}": {
-      "schema": "VideoSubmission",
-      "description": "Student video submissions"
+      "schema": "Submission",
+      "description": "Collection of student submissions"
+    },
+    "/transcriptions/{transcriptionId}": {
+      "schema": "Transcription",
+      "description": "Collection of transcription tasks"
     }
   }
 }

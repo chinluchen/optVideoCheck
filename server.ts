@@ -12,8 +12,22 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
+import admin from "firebase-admin";
+
+// Import the Firebase configuration
+import firebaseConfig from './firebase-applet-config.json';
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
+// Initialize Firebase Admin
+admin.initializeApp({
+  projectId: firebaseConfig.projectId,
+});
+
+const firestore = new admin.firestore.Firestore({
+  projectId: firebaseConfig.projectId,
+  databaseId: firebaseConfig.firestoreDatabaseId,
+});
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
@@ -26,53 +40,65 @@ process.on('unhandledRejection', (reason, promise) => {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize SQLite Database (Stored in Cloud Run instance)
-const db = new Database("submissions.db");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS submissions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    studentName TEXT,
-    videoUrl TEXT,
-    score INTEGER,
-    result TEXT,
-    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+// SQLite is now only used for migration
+const sqliteDb = new Database("submissions.db");
 
-  CREATE TABLE IF NOT EXISTS transcriptions (
-    id TEXT PRIMARY KEY,
-    videoUrl TEXT,
-    status TEXT, -- 'pending', 'processing', 'completed', 'failed'
-    transcript TEXT,
-    error TEXT,
-    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT,
-    role TEXT DEFAULT 'student',
-    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS steps (
-    id TEXT PRIMARY KEY,
-    title TEXT,
-    correctAnswer TEXT,
-    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
-
-// Seed default admin and steps
-const seedData = () => {
-  const adminExists = db.prepare("SELECT * FROM users WHERE username = 'admin'").get();
-  if (!adminExists) {
-    db.prepare("INSERT INTO users (username, password, role) VALUES (?, ?, ?)").run('admin', '0322', 'admin');
+// Migration Logic: Move data from SQLite to Firestore
+const migrateData = async () => {
+  console.log("Checking for data migration...");
+  
+  // Check if users collection is empty
+  const usersSnapshot = await firestore.collection('users').limit(1).get();
+  if (!usersSnapshot.empty) {
+    console.log("Firestore already has data, skipping migration.");
+    return;
   }
 
-  const stepsCount = db.prepare("SELECT COUNT(*) as count FROM steps").get() as { count: number };
-  if (stepsCount.count === 0) {
+  console.log("Starting migration from SQLite to Firestore...");
+
+  // Migrate Users
+  const sqliteUsers = sqliteDb.prepare("SELECT * FROM users").all() as any[];
+  for (const user of sqliteUsers) {
+    await firestore.collection('users').doc(user.id.toString()).set({
+      username: user.username,
+      password: user.password,
+      role: user.role,
+      createdAt: user.createdAt
+    });
+  }
+  console.log(`Migrated ${sqliteUsers.length} users.`);
+
+  // Migrate Steps
+  const sqliteSteps = sqliteDb.prepare("SELECT * FROM steps").all() as any[];
+  for (const step of sqliteSteps) {
+    await firestore.collection('steps').doc(step.id).set({
+      title: step.title,
+      correctAnswer: step.correctAnswer,
+      createdAt: step.createdAt
+    });
+  }
+  console.log(`Migrated ${sqliteSteps.length} steps.`);
+
+  // Migrate Submissions
+  const sqliteSubmissions = sqliteDb.prepare("SELECT * FROM submissions").all() as any[];
+  for (const sub of sqliteSubmissions) {
+    await firestore.collection('submissions').add({
+      studentName: sub.studentName,
+      videoUrl: sub.videoUrl,
+      score: sub.score,
+      result: JSON.parse(sub.result),
+      createdAt: sub.createdAt
+    });
+  }
+  console.log(`Migrated ${sqliteSubmissions.length} submissions.`);
+
+  console.log("Migration completed.");
+};
+
+// Seed default data if Firestore is empty (and migration didn't happen or was empty)
+const seedFirestore = async () => {
+  const stepsSnapshot = await firestore.collection('steps').limit(1).get();
+  if (stepsSnapshot.empty) {
     const defaultSteps = [
       { id: "1", title: "消毒雙手與儀器 (Sanitization)", correctAnswer: "操作者應使用 75% 酒精徹底消毒雙手，並擦拭驗光儀器之額托與下巴托。" },
       { id: "2", title: "調整受檢者坐姿與下巴托 (Patient Positioning)", correctAnswer: "受檢者應坐穩，下巴靠在托架上，額頭緊貼額托，調整高度使受檢者眼睛對準儀器刻度。" },
@@ -83,11 +109,25 @@ const seedData = () => {
       { id: "7", title: "雙眼平衡 (Binocular Balance)", correctAnswer: "使用稜鏡分離法或霧視法，確保雙眼在看遠時的調節狀態一致且平衡。" },
       { id: "8", title: "試戴與最終處方確認 (Final Prescription Confirmation)", correctAnswer: "讓受檢者戴上試鏡架行走，確認是否有晃動感、頭暈或不適，並進行最終度數微調。" }
     ];
-    const insertStep = db.prepare("INSERT INTO steps (id, title, correctAnswer) VALUES (?, ?, ?)");
-    defaultSteps.forEach(s => insertStep.run(s.id, s.title, s.correctAnswer));
+    for (const s of defaultSteps) {
+      await firestore.collection('steps').doc(s.id).set({
+        title: s.title,
+        correctAnswer: s.correctAnswer,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+  }
+
+  const adminSnapshot = await firestore.collection('users').where('username', '==', 'admin').limit(1).get();
+  if (adminSnapshot.empty) {
+    await firestore.collection('users').add({
+      username: 'admin',
+      password: '0322',
+      role: 'admin',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
   }
 };
-seedData();
 
 const transcriptionQueue = new PQueue({ concurrency: 2 });
 let openaiClient: OpenAI | null = null;
@@ -104,21 +144,23 @@ function getOpenAIClient() {
 }
 
 async function processTranscription(id: string, videoUrl: string) {
-  const updateStatus = (status: string, transcript: string | null = null, error: string | null = null) => {
-    const stmt = db.prepare("UPDATE transcriptions SET status = ?, transcript = ?, error = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?");
-    stmt.run(status, transcript, error, id);
+  const updateStatus = async (status: string, transcript: string | null = null, error: string | null = null) => {
+    await firestore.collection('transcriptions').doc(id).update({
+      status,
+      transcript,
+      error,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
   };
 
   try {
     const openai = getOpenAIClient();
-    updateStatus('processing');
+    await updateStatus('processing');
     console.log(`[Transcription ${id}] Starting for ${videoUrl}`);
 
     const tempAudioPath = path.join(tmpdir(), `${id}.mp3`);
     const tempVideoPath = path.join(tmpdir(), `${id}.mp4`);
 
-    // Download YouTube Audio
-    // Note: ytdl-core can be flaky. In a real app, consider a more robust solution.
     await new Promise<void>((resolve, reject) => {
       const stream = ytdl(videoUrl, { quality: 'lowestaudio', filter: 'audioonly' });
       const writeStream = fs.createWriteStream(tempVideoPath);
@@ -127,7 +169,6 @@ async function processTranscription(id: string, videoUrl: string) {
       writeStream.on('error', reject);
     });
 
-    // Convert to MP3 using ffmpeg
     await new Promise<void>((resolve, reject) => {
       ffmpeg(tempVideoPath)
         .toFormat('mp3')
@@ -136,33 +177,33 @@ async function processTranscription(id: string, videoUrl: string) {
         .save(tempAudioPath);
     });
 
-    // Transcribe using OpenAI Whisper
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempAudioPath),
       model: "whisper-1",
     });
 
-    updateStatus('completed', transcription.text);
+    await updateStatus('completed', transcription.text);
     console.log(`[Transcription ${id}] Completed`);
 
-    // Cleanup
     if (fs.existsSync(tempAudioPath)) fs.unlinkSync(tempAudioPath);
     if (fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath);
 
   } catch (error: any) {
     console.error(`[Transcription ${id}] Failed:`, error.message);
-    updateStatus('failed', null, error.message);
+    await updateStatus('failed', null, error.message);
   }
 }
 
 async function startServer() {
+  await migrateData();
+  await seedFirestore();
+
   const app = express();
   const PORT = process.env.PORT || 3000;
 
   app.use(express.json({ limit: '200mb' }));
   app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
-  // Global error handler for middleware (e.g. JSON limit exceeded)
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (err) {
       console.error("Server Middleware Error:", err);
@@ -172,16 +213,23 @@ async function startServer() {
   });
 
   // API Routes
-  app.post("/api/login", (req, res) => {
+  app.post("/api/login", async (req, res) => {
     const { username, password } = req.body;
-    const user = db.prepare("SELECT * FROM users WHERE username = ? AND password = ?").get(username, password) as any;
-    if (user) {
+    const snapshot = await firestore.collection('users')
+      .where('username', '==', username)
+      .where('password', '==', password)
+      .limit(1)
+      .get();
+    
+    if (!snapshot.empty) {
+      const userDoc = snapshot.docs[0];
+      const userData = userDoc.data();
       res.json({ 
         success: true, 
         user: { 
-          uid: user.id.toString(),
-          displayName: user.username, 
-          role: user.role 
+          uid: userDoc.id,
+          displayName: userData.username, 
+          role: userData.role 
         } 
       });
     } else {
@@ -190,75 +238,83 @@ async function startServer() {
   });
 
   // Steps Management
-  app.get("/api/steps", (req, res) => {
-    const steps = db.prepare("SELECT * FROM steps ORDER BY createdAt ASC").all();
+  app.get("/api/steps", async (req, res) => {
+    const snapshot = await firestore.collection('steps').orderBy('createdAt', 'asc').get();
+    const steps = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(steps);
   });
 
-  app.post("/api/steps", (req, res) => {
+  app.post("/api/steps", async (req, res) => {
     const { id, title, correctAnswer } = req.body;
-    const exists = db.prepare("SELECT id FROM steps WHERE id = ?").get(id);
-    if (exists) {
-      db.prepare("UPDATE steps SET title = ?, correctAnswer = ? WHERE id = ?").run(title, correctAnswer, id);
-    } else {
-      db.prepare("INSERT INTO steps (id, title, correctAnswer) VALUES (?, ?, ?)").run(id || randomUUID(), title, correctAnswer);
-    }
+    const stepId = id || randomUUID();
+    await firestore.collection('steps').doc(stepId).set({
+      title,
+      correctAnswer,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
     res.json({ success: true });
   });
 
-  app.delete("/api/steps/:id", (req, res) => {
-    db.prepare("DELETE FROM steps WHERE id = ?").run(req.params.id);
+  app.delete("/api/steps/:id", async (req, res) => {
+    await firestore.collection('steps').doc(req.params.id).delete();
     res.json({ success: true });
   });
 
   // Students Management
-  app.get("/api/students", (req, res) => {
-    const students = db.prepare("SELECT id, username, password, createdAt FROM users WHERE role = 'student' ORDER BY createdAt DESC").all();
+  app.get("/api/students", async (req, res) => {
+    const snapshot = await firestore.collection('users')
+      .where('role', '==', 'student')
+      .orderBy('createdAt', 'desc')
+      .get();
+    const students = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(students);
   });
 
-  app.post("/api/students", (req, res) => {
+  app.post("/api/students", async (req, res) => {
     const { id, username, password } = req.body;
     if (id) {
-      db.prepare("UPDATE users SET username = ?, password = ? WHERE id = ?").run(username, password, id);
+      await firestore.collection('users').doc(id).update({ username, password });
     } else {
-      try {
-        db.prepare("INSERT INTO users (username, password, role) VALUES (?, ?, 'student')").run(username, password);
-      } catch (e: any) {
+      const exists = await firestore.collection('users').where('username', '==', username).limit(1).get();
+      if (!exists.empty) {
         return res.status(400).json({ error: "帳號已存在" });
       }
+      await firestore.collection('users').add({
+        username,
+        password,
+        role: 'student',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     }
     res.json({ success: true });
   });
 
-  app.delete("/api/students/:id", (req, res) => {
-    db.prepare("DELETE FROM users WHERE id = ?").run(req.params.id);
+  app.delete("/api/students/:id", async (req, res) => {
+    await firestore.collection('users').doc(req.params.id).delete();
     res.json({ success: true });
   });
 
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", database: "sqlite" });
+    res.json({ status: "ok", database: "firestore" });
   });
 
-  // Get all submissions
-  app.get("/api/submissions", (req, res) => {
-    const rows = db.prepare("SELECT * FROM submissions ORDER BY createdAt DESC").all();
-    res.json(rows.map(row => ({
-      ...row,
-      result: JSON.parse(row.result as string)
-    })));
+  app.get("/api/submissions", async (req, res) => {
+    const snapshot = await firestore.collection('submissions').orderBy('createdAt', 'desc').get();
+    const submissions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json(submissions);
   });
 
-  // Transcription Endpoints
   app.post("/api/transcribe", async (req, res) => {
     const { videoUrl } = req.body;
     if (!videoUrl) return res.status(400).json({ error: "Missing videoUrl" });
 
     const id = randomUUID();
-    const stmt = db.prepare("INSERT INTO transcriptions (id, videoUrl, status) VALUES (?, ?, ?)");
-    stmt.run(id, videoUrl, 'pending');
+    await firestore.collection('transcriptions').doc(id).set({
+      videoUrl,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
 
-    // Add to background queue
     transcriptionQueue.add(async () => {
       await processTranscription(id, videoUrl);
     });
@@ -266,14 +322,13 @@ async function startServer() {
     res.json({ id, status: 'pending' });
   });
 
-  app.get("/api/transcription/:id", (req, res) => {
+  app.get("/api/transcription/:id", async (req, res) => {
     const { id } = req.params;
-    const row = db.prepare("SELECT * FROM transcriptions WHERE id = ?").get(id);
-    if (!row) return res.status(404).json({ error: "Transcription not found" });
-    res.json(row);
+    const doc = await firestore.collection('transcriptions').doc(id).get();
+    if (!doc.exists) return res.status(404).json({ error: "Transcription not found" });
+    res.json({ id: doc.id, ...doc.data() });
   });
 
-  // Backend Gemini Proxy
   app.post("/api/verify", async (req, res) => {
     console.log("收到驗證請求...");
     let tempFilePath: string | null = null;
@@ -286,7 +341,6 @@ async function startServer() {
         return res.status(500).json({ error: "伺服器尚未設定 GEMINI_API_KEY，請在 Cloud Run 環境變數中設定。" });
       }
 
-      // 使用正確的 SDK 初始化方式
       const ai = new GoogleGenAI({ apiKey });
       
       const systemInstruction = `
@@ -340,7 +394,6 @@ async function startServer() {
         const base64Data = videoData.inlineData.data;
         const mimeType = videoData.inlineData.mimeType;
         
-        // 影片較大時的上傳處理邏輯
         if (base64Data.length > 10 * 1024 * 1024) {
           console.log(`影片較大 (${(base64Data.length / 1024 / 1024).toFixed(2)} MB)，使用 File API 上傳...`);
           const buffer = Buffer.from(base64Data, 'base64');
@@ -351,7 +404,6 @@ async function startServer() {
           const stats = fs.statSync(tempFilePath);
           console.log(`暫存檔案已建立: ${tempFilePath}, 大小: ${stats.size} bytes`);
 
-          // 偵測本地影片長度
           try {
             const metadata: any = await new Promise((resolve, reject) => {
               ffmpeg.ffprobe(tempFilePath!, (err, data) => {
@@ -378,7 +430,6 @@ async function startServer() {
             throw new Error(`Gemini 檔案上傳失敗: ${uploadError.message}`);
           }
           
-          // 根據 SDK 版本，結果可能是 { file: File } 或直接是 File
           const fileObj = uploadResult.file || uploadResult;
           if (!fileObj || !fileObj.name) {
             console.error("無法從上傳結果中取得檔案資訊:", uploadResult);
@@ -388,7 +439,7 @@ async function startServer() {
           console.log("正在等待影片處理:", fileObj.name);
           let file = await (ai as any).files.get(fileObj.name);
           let pollCount = 0;
-          while (file.state === 'PROCESSING' && pollCount < 60) { // 增加等待時間到 120 秒
+          while (file.state === 'PROCESSING' && pollCount < 60) {
             await new Promise(resolve => setTimeout(resolve, 2000));
             file = await (ai as any).files.get(fileObj.name);
             pollCount++;
@@ -414,14 +465,13 @@ async function startServer() {
         ${durationSeconds ? `【影片資訊】：本影片總長度為 ${durationSeconds} 秒。請務必分析至最後一秒，並在 timeline 中紀錄最後的動作。` : ""}
       `;
 
-      // 執行分析 - 使用正確的 ai.models.generateContent 模式
       const result = await ai.models.generateContent({
-        model: "gemini-3-flash-preview", // 使用推薦的穩定版
+        model: "gemini-3-flash-preview",
         contents: [{ role: "user", parts: [...(Array.isArray(contents) ? contents : [contents]), { text: finalPrompt }] }],
         config: { 
           systemInstruction,
           responseMimeType: "application/json", 
-          temperature: 0 // 設為 0 以追求最高精確度
+          temperature: 0
         }
       });
 
@@ -432,22 +482,24 @@ async function startServer() {
       let text = result.text || "{}";
       console.log("Gemini 分析完成，正在解析結果...");
       
-      // 清理 Markdown 標籤的防呆機制
       text = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
       const analysisResult = JSON.parse(text);
 
-      // 儲存至 SQLite
-      console.log("正在儲存至資料庫...");
-      const stmt = db.prepare("INSERT INTO submissions (studentName, videoUrl, score, result) VALUES (?, ?, ?, ?)");
-      stmt.run(studentName || "匿名學生", videoUrl || "本地上傳", analysisResult.score || 0, JSON.stringify(analysisResult));
+      console.log("正在儲存至 Firestore...");
+      await firestore.collection('submissions').add({
+        studentName: studentName || "匿名學生",
+        videoUrl: videoUrl || "本地上傳",
+        score: analysisResult.score || 0,
+        result: analysisResult,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
 
       console.log("驗證成功！");
       res.json(analysisResult);
 
     } catch (error: any) {
       console.error("Gemini Error:", error.message);
-      // 如果遇到 503 錯誤，特別回傳讓前端知道
       const status = error.message.includes("503") ? 503 : 500;
       const displayMessage = status === 503 ? "伺服器忙線中，稍後再試" : (error.message || "分析過程中發生未知錯誤");
       res.status(status).json({ 
@@ -466,12 +518,10 @@ async function startServer() {
     }
   });
 
-  // Catch-all for API routes to prevent HTML fallback
   app.all("/api/*", (req, res) => {
     res.status(404).json({ error: `Route ${req.method} ${req.url} not found` });
   });
 
-  // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

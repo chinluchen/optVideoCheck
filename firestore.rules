@@ -1,58 +1,42 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // ===============================================================
-    // Helper Functions
-    // ===============================================================
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Admin-only access for everything (server-side via firebase-admin bypasses this anyway)
+    // But we define it for clarity and future client-side needs
+    
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
-    }
-
     function isAdmin() {
-      return isAuthenticated() &&
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'teacher' ||
-          (request.auth.token.email == "chinlu0322@gmail.com" && request.auth.token.email_verified == true));
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         request.auth.token.email == "chinlu0322@gmail.com");
     }
-
-    function isValidUser(data) {
-      return data.keys().hasAll(['uid', 'role']) &&
-             data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'createdAt', 'isGuest']) &&
-             data.uid is string &&
-             data.role in ['student', 'teacher'];
-    }
-
-    function isValidSubmission(data) {
-      return data.keys().hasOnly(['id', 'studentUid', 'videoUrl', 'status', 'result', 'createdAt']) &&
-             data.id is string &&
-             data.studentUid == request.auth.uid &&
-             data.videoUrl is string &&
-             data.status in ['pending', 'processing', 'completed', 'failed'];
-    }
-
-    // ===============================================================
-    // Rules
-    // ===============================================================
 
     match /users/{userId} {
-      allow read: if isAuthenticated();
-      allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data) && request.resource.data.role == resource.data.role;
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow write: if isAdmin();
     }
 
-    match /config/standardSteps {
-      allow read: if isAuthenticated();
+    match /steps/{stepId} {
+      allow read: if true; // Publicly readable for the app
       allow write: if isAdmin();
     }
 
     match /submissions/{submissionId} {
       allow read: if isAuthenticated() && (resource.data.studentUid == request.auth.uid || isAdmin());
-      allow create: if isAuthenticated() && isValidSubmission(request.resource.data);
-      allow update: if isAuthenticated() && (resource.data.studentUid == request.auth.uid || isAdmin());
-      allow delete: if isAdmin();
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdmin();
+    }
+
+    match /transcriptions/{transcriptionId} {
+      allow read, write: if isAdmin();
     }
   }
 }
