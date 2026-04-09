@@ -250,6 +250,7 @@ export default function App() {
   const [newStudentUsername, setNewStudentUsername] = useState('');
   const [newStudentPassword, setNewStudentPassword] = useState('');
   const [editingStudentId, setEditingStudentId] = useState<number | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -266,6 +267,7 @@ export default function App() {
         setView('admin-dashboard');
       }
     }
+    setIsAuthReady(true);
   }, []);
 
   // Sync steps from Backend
@@ -761,152 +763,165 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-zinc-50 pb-20">
-      {/* Header */}
-      <header className="bg-white border-b border-zinc-200 sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="bg-indigo-600 p-1.5 rounded-lg">
-              <Glasses className="w-5 h-5 text-white" />
-            </div>
-            <h1 className="font-bold text-xl tracking-tight text-zinc-900">驗光實驗步驟驗證系統</h1>
-          </div>
-          <div className="flex items-center gap-1 bg-zinc-100 p-1 rounded-xl">
-            {(isAdminLoggedIn || userRole === 'admin') && (
-              <button 
-                onClick={() => setView('admin-dashboard')}
-                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view.startsWith('admin-') ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-              >
-                管理後台
-              </button>
-            )}
-            <button 
-              onClick={() => setView('student')}
-              className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'student' ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-            >
-              學生端
-            </button>
-            <button 
-              onClick={() => setView('history')}
-              className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'history' ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-            >
-              歷史紀錄
-            </button>
-            {(!isAdminLoggedIn && userRole !== 'admin') && (
-              <button 
-                onClick={() => {
-                  setView('teacher');
-                  if (!isTeacherLoggedIn && userRole !== 'teacher') {
-                    setLoginUsername('');
-                    setLoginPassword('');
-                    setLoginError('');
-                    setIsLoginDropdownOpen(true);
-                  }
-                }}
-                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'teacher' ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
-              >
-                教師後台
-              </button>
-            )}
-          </div>
-          
-          <div className="flex items-center gap-4 ml-4 pl-4 border-l border-zinc-200 relative">
-            {user ? (
-              <div className="flex items-center gap-3">
-                <div className="text-right hidden sm:block">
-                  <p className="text-xs font-bold text-zinc-900">{user.displayName}</p>
-                  <p className="text-[10px] text-zinc-500 uppercase tracking-widest">
-                    {userRole === 'admin' ? '系統管理員' : userRole === 'teacher' ? '教師' : '學生'}
-                    {user.isAnonymous && ' (訪客模式)'}
-                  </p>
-                </div>
-                <button 
-                  onClick={handleLogout}
-                  className="p-2 hover:bg-zinc-100 rounded-xl transition-colors text-zinc-500"
-                  title="登出"
-                >
-                  <LogOut className="w-5 h-5" />
-                </button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <button 
-                  onClick={() => setIsLoginDropdownOpen(!isLoginDropdownOpen)}
-                  className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
-                >
-                  <LogIn className="w-4 h-4" />
-                  登入 / 測試
-                </button>
-                
-                <AnimatePresence>
-                  {isLoginDropdownOpen && (
-                    <>
-                      <div className="fixed inset-0 z-20" onClick={() => setIsLoginDropdownOpen(false)} />
-                      <motion.div 
-                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                        className="absolute right-0 top-full mt-2 w-72 bg-white border border-zinc-200 rounded-2xl shadow-2xl z-30 overflow-hidden p-6 space-y-6"
-                      >
-                        <div className="text-center space-y-1">
-                          <h3 className="text-lg font-black text-zinc-900">系統登入</h3>
-                          <p className="text-xs text-zinc-500 font-medium">請輸入您的帳號與密碼</p>
-                        </div>
-                        <form onSubmit={handleLogin} className="space-y-4">
-                          <div className="space-y-1.5">
-                            <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">帳號</label>
-                            <input 
-                              type="text" 
-                              value={loginUsername}
-                              onChange={(e) => setLoginUsername(e.target.value)}
-                              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium"
-                              placeholder="請輸入帳號"
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">密碼</label>
-                            <input 
-                              type="password" 
-                              value={loginPassword}
-                              onChange={(e) => setLoginPassword(e.target.value)}
-                              className="w-full bg-zinc-50 border border-zinc-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium"
-                              placeholder="••••"
-                            />
-                          </div>
-                          {loginError && <p className="text-[10px] text-red-500 font-bold text-center">{loginError}</p>}
-                          <button 
-                            type="submit"
-                            className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold text-sm shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95"
-                          >
-                            登入
-                          </button>
-                        </form>
-                        
-                        <div className="h-px bg-zinc-100 my-2" />
-                        
-                        <button 
-                          onClick={() => { handleGuestLogin('student'); setIsLoginDropdownOpen(false); }}
-                          className="w-full flex items-center gap-3 p-3 hover:bg-indigo-50 rounded-xl transition-all text-left group"
-                        >
-                          <div className="w-8 h-8 bg-indigo-100 rounded-lg flex items-center justify-center text-indigo-600">
-                            <UserIcon className="w-4 h-4" />
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-indigo-900">訪客測試 (學生)</p>
-                            <p className="text-[10px] text-indigo-400">無需帳號，僅供測試</p>
-                          </div>
-                        </button>
-                      </motion.div>
-                    </>
-                  )}
-                </AnimatePresence>
-              </div>
-            )}
-          </div>
+      {!isAuthReady ? (
+        <div className="min-h-screen flex items-center justify-center">
+          <div className="w-12 h-12 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin"></div>
         </div>
-      </header>
+      ) : !user ? (
+        <div className="min-h-screen flex items-center justify-center p-6">
+          <motion.div 
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="max-w-md w-full bg-white border border-zinc-200 rounded-[3rem] shadow-2xl overflow-hidden p-10 space-y-8"
+          >
+            <div className="text-center space-y-4">
+              <div className="inline-flex items-center justify-center w-20 h-20 bg-indigo-50 rounded-3xl mb-2">
+                <Glasses className="w-10 h-10 text-indigo-600" />
+              </div>
+              <h2 className="text-3xl font-black text-zinc-900 tracking-tight">驗光實驗驗證系統</h2>
+              <p className="text-zinc-500 font-medium leading-relaxed">請登入您的帳號以開始實驗操作驗證</p>
+            </div>
 
-      <main className="max-w-5xl mx-auto px-6 pt-12">
-        <AnimatePresence mode="wait">
+            <form onSubmit={handleLogin} className="space-y-6">
+              <div className="space-y-2">
+                <label className="text-xs font-black text-zinc-400 uppercase tracking-widest ml-1">帳號</label>
+                <input 
+                  type="text" 
+                  value={loginUsername}
+                  onChange={(e) => setLoginUsername(e.target.value)}
+                  className="w-full bg-zinc-50 border border-zinc-200 rounded-2xl px-5 py-4 text-sm focus:outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 transition-all font-medium"
+                  placeholder="請輸入帳號"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-black text-zinc-400 uppercase tracking-widest ml-1">密碼</label>
+                <input 
+                  type="password" 
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  className="w-full bg-zinc-50 border border-zinc-200 rounded-2xl px-5 py-4 text-sm focus:outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 transition-all font-medium"
+                  placeholder="••••••••"
+                  required
+                />
+              </div>
+              {loginError && (
+                <motion.p 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="text-xs text-red-500 font-bold text-center bg-red-50 py-3 rounded-xl border border-red-100"
+                >
+                  {loginError}
+                </motion.p>
+              )}
+              <button 
+                type="submit"
+                className="w-full bg-indigo-600 text-white py-4.5 rounded-2xl font-bold text-lg shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95 flex items-center justify-center gap-2"
+              >
+                <LogIn className="w-5 h-5" />
+                登入系統
+              </button>
+            </form>
+
+            <div className="relative py-4">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-zinc-100"></div>
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-white px-4 text-zinc-400 font-black tracking-widest">或</span>
+              </div>
+            </div>
+
+            <button 
+              onClick={() => handleGuestLogin('student')}
+              className="w-full flex items-center justify-between p-5 bg-zinc-50 hover:bg-indigo-50 rounded-2xl border border-zinc-100 hover:border-indigo-200 transition-all group"
+            >
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-indigo-600 shadow-sm group-hover:scale-110 transition-transform">
+                  <UserIcon className="w-6 h-6" />
+                </div>
+                <div className="text-left">
+                  <p className="text-sm font-bold text-zinc-900">訪客測試模式</p>
+                  <p className="text-[10px] text-zinc-400 font-medium">無需帳號，僅供功能預覽</p>
+                </div>
+              </div>
+              <ArrowRight className="w-5 h-5 text-zinc-300 group-hover:text-indigo-600 group-hover:translate-x-1 transition-all" />
+            </button>
+          </motion.div>
+        </div>
+      ) : (
+        <>
+          {/* Header */}
+          <header className="bg-white border-b border-zinc-200 sticky top-0 z-10">
+            <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="bg-indigo-600 p-1.5 rounded-lg">
+                  <Glasses className="w-5 h-5 text-white" />
+                </div>
+                <h1 className="font-bold text-xl tracking-tight text-zinc-900">驗光實驗步驟驗證系統</h1>
+              </div>
+              <div className="flex items-center gap-1 bg-zinc-100 p-1 rounded-xl">
+                {(isAdminLoggedIn || userRole === 'admin') && (
+                  <button 
+                    onClick={() => setView('admin-dashboard')}
+                    className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view.startsWith('admin-') ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+                  >
+                    管理後台
+                  </button>
+                )}
+                <button 
+                  onClick={() => setView('student')}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'student' ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+                >
+                  學生端
+                </button>
+                <button 
+                  onClick={() => setView('history')}
+                  className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'history' ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+                >
+                  歷史紀錄
+                </button>
+                {(!isAdminLoggedIn && userRole !== 'admin') && (
+                  <button 
+                    onClick={() => {
+                      setView('teacher');
+                      if (!isTeacherLoggedIn && userRole !== 'teacher') {
+                        setLoginUsername('');
+                        setLoginPassword('');
+                        setLoginError('');
+                        setIsLoginDropdownOpen(true);
+                      }
+                    }}
+                    className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${view === 'teacher' ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+                  >
+                    教師後台
+                  </button>
+                )}
+              </div>
+              
+              <div className="flex items-center gap-4 ml-4 pl-4 border-l border-zinc-200 relative">
+                <div className="flex items-center gap-3">
+                  <div className="text-right hidden sm:block">
+                    <p className="text-xs font-bold text-zinc-900">{user.displayName}</p>
+                    <p className="text-[10px] text-zinc-500 uppercase tracking-widest">
+                      {userRole === 'admin' ? '系統管理員' : userRole === 'teacher' ? '教師' : '學生'}
+                      {user.isAnonymous && ' (訪客模式)'}
+                    </p>
+                  </div>
+                  <button 
+                    onClick={handleLogout}
+                    className="p-2 hover:bg-zinc-100 rounded-xl transition-colors text-zinc-500"
+                    title="登出"
+                  >
+                    <LogOut className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-5xl mx-auto px-6 pt-12">
+            <AnimatePresence mode="wait">
           {view === 'admin-dashboard' ? (
             <motion.div 
               key="admin-dashboard"
@@ -1816,6 +1831,8 @@ export default function App() {
           © {new Date().getFullYear()} 驗光實驗步驟驗證系統 | 網站開發：陳慶儒
         </p>
       </footer>
-    </div>
+    </>
+  )}
+</div>
   );
 }
