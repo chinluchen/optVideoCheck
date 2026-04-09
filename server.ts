@@ -13,6 +13,7 @@ import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
 import admin from "firebase-admin";
+import { getFirestore } from "firebase-admin/firestore";
 
 // Import the Firebase configuration
 import firebaseConfig from './firebase-applet-config.json';
@@ -20,14 +21,9 @@ import firebaseConfig from './firebase-applet-config.json';
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // Initialize Firebase Admin
-admin.initializeApp({
-  projectId: firebaseConfig.projectId,
-});
+admin.initializeApp();
 
-const firestore = new admin.firestore.Firestore({
-  projectId: firebaseConfig.projectId,
-  databaseId: firebaseConfig.firestoreDatabaseId,
-});
+const firestore = getFirestore(firebaseConfig.firestoreDatabaseId);
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
@@ -45,7 +41,7 @@ const sqliteDb = new Database("submissions.db");
 
 // Migration Logic: Move data from SQLite to Firestore
 const migrateData = async () => {
-  console.log("Checking for data migration...");
+  console.log(`Checking for data migration (Database: ${firebaseConfig.firestoreDatabaseId})...`);
   
   // Check if users collection is empty
   const usersSnapshot = await firestore.collection('users').limit(1).get();
@@ -195,8 +191,13 @@ async function processTranscription(id: string, videoUrl: string) {
 }
 
 async function startServer() {
-  await migrateData();
-  await seedFirestore();
+  try {
+    await migrateData();
+    await seedFirestore();
+  } catch (err) {
+    console.error("Firestore Initialization Error (Migration/Seeding):", err);
+    console.log("Server will continue to start, but Firestore operations may fail.");
+  }
 
   const app = express();
   const PORT = process.env.PORT || 3000;
