@@ -21,9 +21,12 @@ import firebaseConfig from './firebase-applet-config.json';
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // Initialize Firebase Admin
-admin.initializeApp();
+admin.initializeApp({
+  storageBucket: firebaseConfig.storageBucket,
+});
 
 const firestore = getFirestore(firebaseConfig.firestoreDatabaseId);
+const storageBucket = admin.storage().bucket(firebaseConfig.storageBucket);
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
@@ -373,7 +376,7 @@ async function startServer() {
     console.log("收到驗證請求...");
     let tempFilePath: string | null = null;
     try {
-      const { prompt, videoData, studentName, videoUrl } = req.body;
+      const { prompt, videoData, studentName, videoUrl, storagePath, videoMimeType } = req.body;
       const apiKey = process.env.GEMINI_API_KEY;
 
       if (!apiKey) {
@@ -415,7 +418,138 @@ async function startServer() {
 
         # 語氣要求
         回覆口氣要親切、專業且具備指導意義。請以「同學你好，我是助教，我已經看完你的操作影片了」作為開頭（放在 advice 或 summary 中）。
+
+        # 強制反幻覺規範（務必遵守）
+        1. 嚴禁補齊或推測未看到的步驟。看不清楚時只能寫「畫面不足，無法確認」。
+        2. 只有在畫面清楚可見時，才可描述具體度數、軸度、稜鏡等精細參數。
+        3. 每一個 timeline 項目都必須附上 evidence 與 confidence：
+           - evidence 只能是 visual / audio / both / unclear
+           - confidence 是 0~1 之間數字
+        4. confidence < 0.6 時，action 必須採保守描述，不可下定論。
       `;
+
+      const responseSchema = {
+        type: "object",
+        properties: {
+          score: { type: "number", minimum: 0, maximum: 100 },
+          summary: { type: "string" },
+          timeline: {
+            type: "array",
+            minItems: 1,
+            items: {
+              type: "object",
+              properties: {
+                time: { type: "string", description: "mm:ss" },
+                action: { type: "string" },
+                evidence: { type: "string", enum: ["visual", "audio", "both", "unclear"] },
+                confidence: { type: "number", minimum: 0, maximum: 1 }
+              },
+              required: ["time", "action", "evidence", "confidence"]
+            }
+          },
+          strengths: { type: "array", minItems: 2, maxItems: 4, items: { type: "string" } },
+          weaknesses: { type: "array", minItems: 2, maxItems: 4, items: { type: "string" } },
+          advice: { type: "string" },
+          uncertainties: { type: "array", items: { type: "string" } }
+        },
+        required: ["score", "summary", "timeline", "strengths", "weaknesses", "advice"]
+      };
+
+      const toSeconds = (timeLike: string): number | null => {
+        if (!timeLike || typeof timeLike !== "string") return null;
+        const parts = timeLike.trim().split(":");
+        if (parts.length !== 2) return null;
+        const mm = Number(parts[0]);
+        const ss = Number(parts[1]);
+        if (!Number.isFinite(mm) || !Number.isFinite(ss) || mm < 0 || ss < 0 || ss > 59) return null;
+        return mm * 60 + ss;
+      };
+
+      const toMMSS = (totalSeconds: number): string => {
+        const safe = Math.max(0, Math.floor(totalSeconds));
+        const mm = String(Math.floor(safe / 60)).padStart(2, "0");
+        const ss = String(safe % 60).padStart(2, "0");
+        return `${mm}:${ss}`;
+      };
+
+      const sanitizeAnalysisResult = (raw: any, duration: number | null) => {
+        const sourceTimeline = Array.isArray(raw?.timeline) ? raw.timeline : [];
+        const timeline = sourceTimeline
+          .map((item: any) => {
+            const rawAction = typeof item?.action === "string" ? item.action.trim() : "";
+            if (!rawAction) return null;
+
+            const evidence = typeof item?.evidence === "string" ? item.evidence : "unclear";
+            const confidenceNum = Number(item?.confidence);
+            const confidence = Number.isFinite(confidenceNum) ? Math.max(0, Math.min(1, confidenceNum)) : 0.5;
+
+            let seconds = toSeconds(item?.time);
+            if (seconds === null) seconds = 0;
+            if (duration !== null) seconds = Math.min(seconds, Math.max(0, duration));
+            const time = toMMSS(seconds);
+
+            let action = rawAction;
+            if (confidence < 0.6 || evidence === "unclear") {
+              action = action.includes("畫面不足，無法確認") ? action : `畫面不足，無法確認：${action}`;
+            }
+
+            return { time, action, evidence, confidence };
+          })
+          .filter(Boolean) as Array<{ time: string; action: string; evidence: string; confidence: number }>;
+
+        const cleanedTimeline = timeline.length > 0 ? timeline : [{ time: "00:00", action: "畫面不足，無法確認：無足夠可見資訊可建立時間軸。", evidence: "unclear", confidence: 0 }];
+
+        const scoreNum = Number(raw?.score);
+        const score = Number.isFinite(scoreNum) ? Math.max(0, Math.min(100, Math.round(scoreNum))) : 0;
+        const strengths = Array.isArray(raw?.strengths) ? raw.strengths.filter((s: any) => typeof s === "string" && s.trim()).slice(0, 4) : [];
+        const weaknesses = Array.isArray(raw?.weaknesses) ? raw.weaknesses.filter((s: any) => typeof s === "string" && s.trim()).slice(0, 4) : [];
+        const uncertainties = Array.isArray(raw?.uncertainties) ? raw.uncertainties.filter((s: any) => typeof s === "string" && s.trim()).slice(0, 8) : [];
+
+        return {
+          score,
+          summary: typeof raw?.summary === "string" && raw.summary.trim() ? raw.summary.trim() : "同學你好，我是助教，我已經看完你的操作影片了。整體上可再加強可觀察細節與步驟完整性。",
+          timeline: cleanedTimeline.map(({ time, action }) => ({ time, action })),
+          strengths: strengths.length > 0 ? strengths : ["有完成部分可見操作流程", "整體操作態度尚可"],
+          weaknesses: weaknesses.length > 0 ? weaknesses : ["部分畫面可見度不足", "部分步驟缺少可確認證據"],
+          advice: typeof raw?.advice === "string" && raw.advice.trim() ? raw.advice.trim() : "同學你好，我是助教，我已經看完你的操作影片了。建議下次拍攝時調整角度與光線，讓關鍵操作更清楚。",
+          uncertainties
+        };
+      };
+
+      const uploadFileToGeminiAndBuildPart = async (localFilePath: string, mimeType: string) => {
+        console.log("正在上傳至 Gemini File API...");
+        let uploadResult;
+        try {
+          uploadResult = await (ai as any).files.upload(localFilePath, {
+            mimeType,
+            displayName: "Student Upload",
+          });
+          console.log("Gemini File API 上傳成功:", JSON.stringify(uploadResult));
+        } catch (uploadError: any) {
+          console.error("Gemini File API 上傳失敗:", uploadError);
+          throw new Error(`Gemini 檔案上傳失敗: ${uploadError.message}`);
+        }
+
+        const fileObj = uploadResult.file || uploadResult;
+        if (!fileObj || !fileObj.name) {
+          console.error("無法從上傳結果中取得檔案資訊:", uploadResult);
+          throw new Error("Gemini 上傳失敗: 無法取得檔案資訊");
+        }
+
+        console.log("正在等待影片處理:", fileObj.name);
+        let file = await (ai as any).files.get(fileObj.name);
+        let pollCount = 0;
+        while (file.state === 'PROCESSING' && pollCount < 60) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          file = await (ai as any).files.get(fileObj.name);
+          pollCount++;
+        }
+
+        if (file.state === 'FAILED') throw new Error("Gemini 影片處理失敗");
+        if (file.state === 'PROCESSING') throw new Error("影片處理超時");
+
+        return { fileData: { fileUri: file.uri, mimeType: file.mimeType } };
+      };
 
       let durationSeconds: number | null = null;
       if (videoUrl && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'))) {
@@ -430,7 +564,34 @@ async function startServer() {
 
       let contents: any;
 
-      if (videoData && videoData.inlineData) {
+      if (storagePath) {
+        const extension = path.extname(storagePath) || '.mp4';
+        tempFilePath = path.join(tmpdir(), `storage_upload_${randomUUID()}${extension}`);
+        const bucketFile = storageBucket.file(storagePath);
+
+        console.log(`從 Cloud Storage 下載影片: ${storagePath}`);
+        await bucketFile.download({ destination: tempFilePath });
+        const [metadata] = await bucketFile.getMetadata();
+        const effectiveMimeType = videoMimeType || metadata.contentType || "video/mp4";
+
+        try {
+          const probeResult: any = await new Promise((resolve, reject) => {
+            ffmpeg.ffprobe(tempFilePath!, (err, data) => {
+              if (err) reject(err);
+              else resolve(data);
+            });
+          });
+          durationSeconds = Math.round(probeResult.format.duration);
+          console.log(`偵測到雲端影片長度: ${durationSeconds} 秒`);
+        } catch (e) {
+          console.warn("雲端影片長度偵測失敗:", e);
+        }
+
+        contents = [
+          await uploadFileToGeminiAndBuildPart(tempFilePath, effectiveMimeType),
+          { text: prompt || "請分析這段操作影片並給予建議。" }
+        ];
+      } else if (videoData && videoData.inlineData) {
         const base64Data = videoData.inlineData.data;
         const mimeType = videoData.inlineData.mimeType;
         
@@ -456,46 +617,20 @@ async function startServer() {
           } catch (e) {
             console.warn("本地影片長度偵測失敗:", e);
           }
-          
-          console.log("正在上傳至 Gemini File API...");
-          let uploadResult;
-          try {
-            uploadResult = await (ai as any).files.upload(tempFilePath, {
-              mimeType,
-              displayName: "Student Upload",
-            });
-            console.log("Gemini File API 上傳成功:", JSON.stringify(uploadResult));
-          } catch (uploadError: any) {
-            console.error("Gemini File API 上傳失敗:", uploadError);
-            throw new Error(`Gemini 檔案上傳失敗: ${uploadError.message}`);
-          }
-          
-          const fileObj = uploadResult.file || uploadResult;
-          if (!fileObj || !fileObj.name) {
-            console.error("無法從上傳結果中取得檔案資訊:", uploadResult);
-            throw new Error("Gemini 上傳失敗: 無法取得檔案資訊");
-          }
 
-          console.log("正在等待影片處理:", fileObj.name);
-          let file = await (ai as any).files.get(fileObj.name);
-          let pollCount = 0;
-          while (file.state === 'PROCESSING' && pollCount < 60) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            file = await (ai as any).files.get(fileObj.name);
-            pollCount++;
-          }
-          
-          if (file.state === 'FAILED') throw new Error("Gemini 影片處理失敗");
-          if (file.state === 'PROCESSING') throw new Error("影片處理超時");
-          
           contents = [
-            { fileData: { fileUri: file.uri, mimeType: file.mimeType } },
+            await uploadFileToGeminiAndBuildPart(tempFilePath, mimeType),
             { text: prompt || "請分析這段操作影片並給予建議。" }
           ];
         } else {
           console.log("影片較小，使用 inlineData 分析...");
           contents = [videoData, { text: prompt || "請分析這段操作影片並給予建議。" }];
         }
+      } else if (videoUrl && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'))) {
+        contents = [
+          { fileData: { fileUri: videoUrl, mimeType: "video/*" } },
+          { text: prompt || "請分析這段 YouTube 影片並給予建議。" }
+        ];
       } else {
         contents = [{ text: prompt }];
       }
@@ -503,6 +638,7 @@ async function startServer() {
       const finalPrompt = `
         ${prompt}
         ${durationSeconds ? `【影片資訊】：本影片總長度為 ${durationSeconds} 秒。請務必分析至最後一秒，並在 timeline 中紀錄最後的動作。` : ""}
+        【重要】若證據不足，請明確輸出「畫面不足，無法確認」，不要推測補全。
       `;
 
       const result = await ai.models.generateContent({
@@ -511,6 +647,7 @@ async function startServer() {
         config: { 
           systemInstruction,
           responseMimeType: "application/json", 
+          responseSchema,
           temperature: 0
         }
       });
@@ -524,12 +661,13 @@ async function startServer() {
       
       text = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
-      const analysisResult = JSON.parse(text);
+      const rawAnalysisResult = JSON.parse(text);
+      const analysisResult = sanitizeAnalysisResult(rawAnalysisResult, durationSeconds);
 
       console.log("正在儲存至 Firestore...");
       await firestore.collection('submissions').add({
         studentName: studentName || "匿名學生",
-        videoUrl: videoUrl || "本地上傳",
+        videoUrl: storagePath || videoUrl || "本地上傳",
         score: analysisResult.score || 0,
         result: analysisResult,
         createdAt: admin.firestore.FieldValue.serverTimestamp()

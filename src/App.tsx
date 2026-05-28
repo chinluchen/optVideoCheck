@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { YoutubeTranscript } from 'youtube-transcript';
 import { 
   Youtube, 
   CheckCircle2, 
@@ -51,35 +50,9 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import * as XLSX from 'xlsx';
 
-// Firebase imports removed - now using Cloud Run Backend API
-// import { auth, db, storage } from './firebase';
-import { 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  onAuthStateChanged, 
-  signOut,
-  signInAnonymously,
-  User
-} from 'firebase/auth';
-import { 
-  collection, 
-  addDoc, 
-  query, 
-  where, 
-  orderBy, 
-  onSnapshot,
-  doc,
-  setDoc,
-  getDoc,
-  updateDoc,
-  serverTimestamp,
-  Timestamp
-} from 'firebase/firestore';
-import { 
-  ref, 
-  uploadBytesResumable, 
-  getDownloadURL 
-} from 'firebase/storage';
+import { signInAnonymously } from 'firebase/auth';
+import { ref, uploadBytesResumable } from 'firebase/storage';
+import { auth, storage } from './firebase';
 
 // Standard Optometry Steps for Reference
 const DEFAULT_STEPS: Step[] = [
@@ -117,6 +90,9 @@ interface SortableStepItemProps {
   onDelete: () => void;
   onUpdateTitle: (title: string) => void;
 }
+
+const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '_');
+const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'v0.0.0-local';
 
 const SortableStepItem: React.FC<SortableStepItemProps> = ({ 
   step, 
@@ -271,6 +247,12 @@ export default function App() {
     setIsAuthReady(true);
   }, []);
 
+  useEffect(() => {
+    signInAnonymously(auth).catch((err) => {
+      console.warn("Anonymous Firebase auth failed:", err);
+    });
+  }, []);
+
   // Sync steps from Backend
   const fetchSteps = async () => {
     try {
@@ -356,8 +338,8 @@ export default function App() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (file.size > 100 * 1024 * 1024) { // 100MB limit
-        setError('檔案太大，請上傳小於 100MB 的影片');
+      if (file.size > 1024 * 1024 * 1024) { // 1GB safety guard
+        setError('檔案太大，請上傳小於 1GB 的影片');
         return;
       }
       setVideoFile(file);
@@ -640,74 +622,45 @@ export default function App() {
     setResult(null);
 
     try {
-      let finalVideoUrl = url;
-      let videoData: any = null;
+      let finalVideoUrl = url.trim();
+      let storagePath: string | null = null;
+      let videoMimeType: string | null = null;
 
-      // Handle File Upload - Direct to Gemini via Backend
       if (videoFile) {
+        setTranscriptionStatus('正在上傳影片到雲端儲存...');
         setUploadProgress(5);
-        
-        // Convert to base64 for Gemini
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve((reader.result as string).split(',')[1]);
-          reader.onerror = reject;
-          reader.readAsDataURL(videoFile);
+
+        const safeFileName = sanitizeFileName(videoFile.name || `upload-${Date.now()}.mp4`);
+        const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        storagePath = `uploads/${user.uid}/${uniqueSuffix}-${safeFileName}`;
+        videoMimeType = videoFile.type || 'video/mp4';
+
+        const storageRef = ref(storage, storagePath);
+        const uploadTask = uploadBytesResumable(storageRef, videoFile, {
+          contentType: videoMimeType,
         });
-        
-        setUploadProgress(10);
-        videoData = {
-          inlineData: {
-            data: base64,
-            mimeType: videoFile.type
-          }
-        };
+
+        await new Promise<void>((resolve, reject) => {
+          uploadTask.on(
+            'state_changed',
+            (snapshot) => {
+              if (!snapshot.totalBytes) return;
+              const percent = (snapshot.bytesTransferred / snapshot.totalBytes) * 60;
+              setUploadProgress(5 + percent);
+            },
+            (uploadErr) => {
+              console.error("Storage upload failed:", uploadErr);
+              reject(new Error('影片上傳失敗，請稍後再試。'));
+            },
+            () => resolve()
+          );
+        });
+
         finalVideoUrl = "本地上傳影片";
-      }
-
-      // Verification logic now handled by backend /api/verify
-      let actualTranscript = "";
-      if (url.trim()) {
-        try {
-          setTranscriptionStatus('正在啟動後台轉錄程序...');
-          const transcribeRes = await fetch('/api/transcribe', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ videoUrl: url })
-          });
-          
-          if (!transcribeRes.ok) throw new Error('無法啟動轉錄程序');
-          
-          const { id } = await transcribeRes.json();
-          
-          // Polling
-          let status = 'pending';
-          let attempts = 0;
-          const maxAttempts = 60; // 3 minutes max
-
-          while ((status === 'pending' || status === 'processing') && attempts < maxAttempts) {
-            attempts++;
-            await new Promise(r => setTimeout(r, 3000));
-            const pollRes = await fetch(`/api/transcription/${id}`);
-            const pollData = await pollRes.json();
-            status = pollData.status;
-            
-            if (status === 'processing') {
-              setTranscriptionStatus('正在下載並轉錄音訊...');
-            } else if (status === 'completed') {
-              actualTranscript = pollData.transcript;
-              setTranscriptionStatus('轉錄完成！');
-            } else if (status === 'failed') {
-              console.warn("Whisper transcription failed:", pollData.error);
-              setTranscriptionStatus('轉錄失敗，嘗試備用方案...');
-              break;
-            }
-          }
-        } catch (transcriptErr) {
-          console.warn("Transcription queue error:", transcriptErr);
-        } finally {
-          setTimeout(() => setTranscriptionStatus(null), 2000);
-        }
+        setUploadProgress(70);
+        setTranscriptionStatus('影片上傳完成，準備 AI 分析...');
+      } else {
+        setTranscriptionStatus('正在準備分析 YouTube 影片...');
       }
 
       const prompt = `
@@ -718,21 +671,20 @@ export default function App() {
         }).join('\n\n')}
 
         ${url ? `影片連結：${url}` : "影片已隨附於此請求中。"}
-        ${actualTranscript ? `【系統提取之原始逐字稿（僅供參考，請以影片實際聽到的為準）】：\n${actualTranscript}\n` : ""}
 
         請根據上述標準分析影片。
       `;
 
-      // Call Backend API with real upload progress
+      // Call Backend API for analysis
       const data = await new Promise<any>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/api/verify');
         xhr.setRequestHeader('Content-Type', 'application/json');
         
-        // Start a timer to simulate analysis progress once upload is near complete
         let analysisInterval: any;
-        const startAnalysisSim = (startVal: number) => {
+        const startAnalysisSim = (startAt: number) => {
           if (analysisInterval) return;
+          setUploadProgress((prev) => (prev === null ? startAt : prev));
           analysisInterval = setInterval(() => {
             setUploadProgress(prev => {
               if (prev === null) return null;
@@ -740,24 +692,14 @@ export default function App() {
                 clearInterval(analysisInterval);
                 return 99;
               }
-              // Increment slowly: 0.1% every 500ms
-              return prev + 0.1;
+              return prev + 0.2;
             });
           }, 500);
         };
 
-        xhr.upload.onprogress = (event) => {
-          if (event.lengthComputable) {
-            // Map 0-100% upload to 10-90% total progress
-            const percentComplete = (event.loaded / event.total) * 80;
-            const currentProgress = 10 + percentComplete;
-            setUploadProgress(currentProgress);
-            
-            if (currentProgress >= 89) {
-              startAnalysisSim(currentProgress);
-            }
-          }
-        };
+        if (videoFile) {
+          startAnalysisSim(70);
+        }
         
         xhr.onload = () => {
           if (analysisInterval) clearInterval(analysisInterval);
@@ -787,20 +729,17 @@ export default function App() {
         
         xhr.send(JSON.stringify({
           prompt,
-          videoData,
           modelName: "gemini-3-flash-preview",
           studentName: user.displayName,
           videoUrl: finalVideoUrl,
-          studentUid: user.uid
+          studentUid: user.uid,
+          storagePath,
+          videoMimeType
         }));
       });
-      
-      if ((!data.transcript || data.transcript.length < 50) && actualTranscript) {
-        data.transcript = actualTranscript;
-      }
 
       setResult(data);
-      // History is now saved by the backend into SQLite
+      setTranscriptionStatus(null);
 
     } catch (err: any) {
       console.error(err);
@@ -808,6 +747,7 @@ export default function App() {
     } finally {
       setLoading(false);
       setUploadProgress(null);
+      setTranscriptionStatus(null);
     }
   };
 
@@ -1914,7 +1854,7 @@ export default function App() {
 
       <footer className="max-w-5xl mx-auto px-6 py-12 border-t border-zinc-200 mt-12 text-center">
         <p className="text-zinc-400 text-sm font-medium">
-          © {new Date().getFullYear()} 驗光實驗步驟驗證系統 | 網站開發：陳慶儒
+          © {new Date().getFullYear()} 驗光實驗步驟驗證系統 | 版本：{APP_VERSION} | 網站開發：陳慶儒
         </p>
       </footer>
     </>
