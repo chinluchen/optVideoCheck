@@ -92,7 +92,7 @@ interface SortableStepItemProps {
 }
 
 const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '_');
-const APP_VERSION = (import.meta.env.VITE_APP_VERSION || 'v0.0.0').replace(/-local$/, '');
+const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'v0.0.0';
 
 const SortableStepItem: React.FC<SortableStepItemProps> = ({ 
   step, 
