@@ -627,9 +627,12 @@ async function startServer() {
           contents = [videoData, { text: prompt || "請分析這段操作影片並給予建議。" }];
         }
       } else if (videoUrl && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'))) {
+        // Avoid Gemini direct YouTube fileData path because it can return PERMISSION_DENIED
+        // for non-public links and break the entire flow.
         contents = [
-          { fileData: { fileUri: videoUrl, mimeType: "video/*" } },
-          { text: prompt || "請分析這段 YouTube 影片並給予建議。" }
+          {
+            text: `${prompt || "請分析這段 YouTube 影片並給予建議。"}\n\n【YouTube 連結】${videoUrl}`
+          }
         ];
       } else {
         contents = [{ text: prompt }];
