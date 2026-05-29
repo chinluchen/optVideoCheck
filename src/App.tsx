@@ -50,10 +50,6 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import * as XLSX from 'xlsx';
 
-import { signInAnonymously } from 'firebase/auth';
-import { ref, uploadBytesResumable } from 'firebase/storage';
-import { auth, storage } from './firebase';
-
 // Standard Optometry Steps for Reference
 const DEFAULT_STEPS: Step[] = [
   { id: "1", title: "消毒雙手與儀器 (Sanitization)", correctAnswer: "操作者應使用 75% 酒精徹底消毒雙手，並擦拭驗光儀器之額托與下巴托。" },
@@ -91,7 +87,6 @@ interface SortableStepItemProps {
   onUpdateTitle: (title: string) => void;
 }
 
-const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '_');
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'v0.0.0';
 
 const SortableStepItem: React.FC<SortableStepItemProps> = ({ 
@@ -247,12 +242,6 @@ export default function App() {
     setIsAuthReady(true);
   }, []);
 
-  useEffect(() => {
-    signInAnonymously(auth).catch((err) => {
-      console.warn("Anonymous Firebase auth failed:", err);
-    });
-  }, []);
-
   // Sync steps from Backend
   const fetchSteps = async () => {
     try {
@@ -338,8 +327,8 @@ export default function App() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (file.size > 1024 * 1024 * 1024) { // 1GB safety guard
-        setError('檔案太大，請上傳小於 1GB 的影片');
+      if (file.size > 100 * 1024 * 1024) { // 100MB limit
+        setError('檔案太大，請上傳小於 100MB 的影片');
         return;
       }
       setVideoFile(file);
@@ -623,42 +612,27 @@ export default function App() {
 
     try {
       let finalVideoUrl = url.trim();
-      let storagePath: string | null = null;
-      let videoMimeType: string | null = null;
+      let videoData: any = null;
 
       if (videoFile) {
-        setTranscriptionStatus('正在上傳影片到雲端儲存...');
+        setTranscriptionStatus('正在讀取上傳影片...');
         setUploadProgress(5);
-
-        const safeFileName = sanitizeFileName(videoFile.name || `upload-${Date.now()}.mp4`);
-        const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-        storagePath = `uploads/${user.uid}/${uniqueSuffix}-${safeFileName}`;
-        videoMimeType = videoFile.type || 'video/mp4';
-
-        const storageRef = ref(storage, storagePath);
-        const uploadTask = uploadBytesResumable(storageRef, videoFile, {
-          contentType: videoMimeType,
-        });
-
-        await new Promise<void>((resolve, reject) => {
-          uploadTask.on(
-            'state_changed',
-            (snapshot) => {
-              if (!snapshot.totalBytes) return;
-              const percent = (snapshot.bytesTransferred / snapshot.totalBytes) * 60;
-              setUploadProgress(5 + percent);
-            },
-            (uploadErr) => {
-              console.error("Storage upload failed:", uploadErr);
-              reject(new Error('影片上傳失敗，請稍後再試。'));
-            },
-            () => resolve()
-          );
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve((reader.result as string).split(',')[1]);
+          reader.onerror = reject;
+          reader.readAsDataURL(videoFile);
         });
 
         finalVideoUrl = "本地上傳影片";
-        setUploadProgress(70);
-        setTranscriptionStatus('影片上傳完成，準備 AI 分析...');
+        videoData = {
+          inlineData: {
+            data: base64,
+            mimeType: videoFile.type || 'video/mp4'
+          }
+        };
+        setUploadProgress(10);
+        setTranscriptionStatus('影片已讀取，準備 AI 分析...');
       } else {
         setTranscriptionStatus('正在準備分析 YouTube 影片...');
       }
@@ -698,7 +672,7 @@ export default function App() {
         };
 
         if (videoFile) {
-          startAnalysisSim(70);
+          startAnalysisSim(10);
         }
         
         xhr.onload = () => {
@@ -729,12 +703,11 @@ export default function App() {
         
         xhr.send(JSON.stringify({
           prompt,
+          videoData,
           modelName: "gemini-3-flash-preview",
           studentName: user.displayName,
           videoUrl: finalVideoUrl,
-          studentUid: user.uid,
-          storagePath,
-          videoMimeType
+          studentUid: user.uid
         }));
       });
 
