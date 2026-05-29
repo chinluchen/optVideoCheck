@@ -524,6 +524,39 @@ async function startServer() {
         return toMMSS(seconds);
       };
 
+      const genericEvidenceTokens = new Set([
+        "操作", "動作", "步驟", "流程", "檢查", "測試", "儀器", "學生", "同學", "影片", "畫面",
+        "進行", "完成", "可能", "應該", "看見", "看到", "聽到", "調整", "使用", "鏡片", "驗光"
+      ]);
+
+      const extractKeywords = (text: string) => {
+        const raw = (text || "").match(/[\u4e00-\u9fffA-Za-z0-9]+/g) || [];
+        return raw
+          .map((token) => token.trim().toLowerCase())
+          .filter((token) => {
+            if (!token) return false;
+            if (token.length <= 1) return false;
+            if (genericEvidenceTokens.has(token)) return false;
+            return true;
+          });
+      };
+
+      const hasStepKeywordSupport = (evidence: string, checklistStep: ChecklistStep) => {
+        const evidenceTokens = new Set(extractKeywords(evidence));
+        const stepTokens = new Set([
+          ...extractKeywords(checklistStep.step_name),
+          ...extractKeywords(checklistStep.criteria)
+        ]);
+
+        if (stepTokens.size === 0 || evidenceTokens.size === 0) return false;
+
+        let hitCount = 0;
+        for (const token of stepTokens) {
+          if (evidenceTokens.has(token)) hitCount++;
+        }
+        return hitCount >= 1;
+      };
+
       const defaultFeedbackByStatus: Record<StepStatus, string> = {
         明確完成: "此步驟有明確證據且時間點清楚，請維持目前操作。",
         可能完成: "有部分跡象，但證據仍不足，建議補充更清晰畫面或口述。",
@@ -533,8 +566,9 @@ async function startServer() {
 
       const sanitizeSingleStep = (source: any, checklistStep: ChecklistStep, duration: number | null): StepCheck => {
         let status = normalizeStatus(source?.status);
+        let downgradedByEvidenceGate = false;
         const confidenceNum = Number(source?.confidence);
-        const confidence = Number.isFinite(confidenceNum) ? Math.max(0, Math.min(1, confidenceNum)) : 0;
+        let confidence = Number.isFinite(confidenceNum) ? Math.max(0, Math.min(1, confidenceNum)) : 0;
         const evidenceRaw = typeof source?.evidence === "string" ? source.evidence.trim() : "";
         const evidence = evidenceRaw || "未提供明確證據";
         const timestamp = normalizeTimestamp(source?.timestamp, duration);
@@ -548,9 +582,15 @@ async function startServer() {
         if (status === "明確完成" && (!hasTimestamp || !hasEvidence || confidence < 0.75)) {
           status = hasEvidence && hasTimestamp ? "可能完成" : "無法判斷";
         }
+        if ((status === "明確完成" || status === "可能完成") && !hasStepKeywordSupport(evidence, checklistStep)) {
+          status = "無法判斷";
+          confidence = Math.min(confidence, 0.49);
+          downgradedByEvidenceGate = true;
+        }
 
         const feedbackRaw = typeof source?.feedback === "string" ? source.feedback.trim() : "";
-        const feedback = feedbackRaw || defaultFeedbackByStatus[status];
+        const fallbackFeedback = defaultFeedbackByStatus[status];
+        const feedback = feedbackRaw && !downgradedByEvidenceGate ? feedbackRaw : fallbackFeedback;
 
         return {
           step_id: checklistStep.step_id,
@@ -654,6 +694,34 @@ async function startServer() {
           statusCounts,
           checklistVersion: "fixed-v1"
         };
+      };
+
+      const buildUnableToJudgeResult = (reason: string, duration: number | null) => {
+        const raw = {
+          step_checks: checklistItems.map((step) => ({
+            step_id: step.step_id,
+            step_name: step.step_name,
+            status: "無法判斷",
+            confidence: 0,
+            evidence: reason,
+            timestamp: "N/A",
+            feedback: "來源資料不足，系統依規則不得推論完成。"
+          }))
+        };
+        return buildFinalResult(raw, duration);
+      };
+
+      const downloadYoutubeToTempFile = async (targetUrl: string) => {
+        const ytTempPath = path.join(tmpdir(), `yt_${randomUUID()}.mp4`);
+        await new Promise<void>((resolve, reject) => {
+          const stream = ytdl(targetUrl, { quality: "18" });
+          const writer = fs.createWriteStream(ytTempPath);
+          stream.on("error", reject);
+          writer.on("error", reject);
+          writer.on("finish", () => resolve());
+          stream.pipe(writer);
+        });
+        return ytTempPath;
       };
 
       const uploadFileToGeminiAndBuildPart = async (localFilePath: string, mimeType: string) => {
@@ -761,15 +829,55 @@ async function startServer() {
           contents = [videoData];
         }
       } else if (videoUrl && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'))) {
-        // Avoid Gemini direct YouTube fileData path because it can return PERMISSION_DENIED
-        // for non-public links and break the entire flow.
-        contents = [
-          {
-            text: `【YouTube 連結】${videoUrl}\n（提醒：若無法直接取用影片內容，請只輸出無法判斷，不可推論。）`
+        try {
+          console.log("YouTube 驗證：嘗試先下載影片再送 AI 分析...");
+          tempFilePath = await downloadYoutubeToTempFile(videoUrl);
+          try {
+            const metadata: any = await new Promise((resolve, reject) => {
+              ffmpeg.ffprobe(tempFilePath!, (err, data) => {
+                if (err) reject(err);
+                else resolve(data);
+              });
+            });
+            durationSeconds = Math.round(metadata.format.duration);
+            console.log(`偵測到 YouTube 下載影片長度: ${durationSeconds} 秒`);
+          } catch (e) {
+            console.warn("YouTube 下載影片長度偵測失敗:", e);
           }
-        ];
+
+          contents = [await uploadFileToGeminiAndBuildPart(tempFilePath, "video/mp4")];
+        } catch (ytError: any) {
+          console.warn("YouTube 下載失敗，改為保守輸出無法判斷:", ytError?.message || ytError);
+          const fallbackResult = buildUnableToJudgeResult(
+            "無法取得 YouTube 影片畫面（可能為權限或平台限制），系統不得推論步驟完成。",
+            durationSeconds
+          );
+          await firestore.collection('submissions').add({
+            studentName: studentName || "匿名學生",
+            videoUrl: videoUrl || "YouTube 連結",
+            score: fallbackResult.score || 0,
+            result: fallbackResult,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          return res.json(fallbackResult);
+        }
       } else {
         contents = [];
+      }
+
+      if (contents.length === 0) {
+        const fallbackResult = buildUnableToJudgeResult(
+          "未取得可驗證影片內容，系統依規則只能標示為無法判斷。",
+          durationSeconds
+        );
+        await firestore.collection('submissions').add({
+          studentName: studentName || "匿名學生",
+          videoUrl: storagePath || videoUrl || "未提供影片",
+          score: fallbackResult.score || 0,
+          result: fallbackResult,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        return res.json(fallbackResult);
       }
 
       const finalPrompt = `
