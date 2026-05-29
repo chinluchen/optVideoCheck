@@ -68,6 +68,18 @@ interface Step {
   correctAnswer: string;
 }
 
+type StepStatus = '明確完成' | '可能完成' | '無法判斷' | '明確未完成';
+
+interface StepCheckResult {
+  step_id: string;
+  step_name: string;
+  status: StepStatus;
+  confidence: number;
+  evidence: string;
+  timestamp: string;
+  feedback: string;
+}
+
 interface VerificationResult {
   score: number;
   summary: string;
@@ -75,6 +87,9 @@ interface VerificationResult {
   strengths: string[];
   weaknesses: string[];
   advice: string;
+  step_checks?: StepCheckResult[];
+  statusCounts?: Partial<Record<StepStatus, number>>;
+  checklistVersion?: string;
 }
 
 interface SortableStepItemProps {
@@ -88,6 +103,31 @@ interface SortableStepItemProps {
 }
 
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'v0.0.0';
+
+const STATUS_BADGE_STYLES: Record<StepStatus, string> = {
+  '明確完成': 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  '可能完成': 'bg-amber-100 text-amber-700 border-amber-200',
+  '無法判斷': 'bg-zinc-200 text-zinc-700 border-zinc-300',
+  '明確未完成': 'bg-red-100 text-red-700 border-red-200'
+};
+
+const buildStepCheckTranscript = (stepChecks: StepCheckResult[]) =>
+  stepChecks
+    .map((step) => {
+      const confidence = Number.isFinite(step.confidence) ? Math.round(step.confidence * 100) : 0;
+      return `[${step.timestamp || 'N/A'}] ${step.step_name}｜${step.status}｜信心 ${confidence}%｜證據：${step.evidence}`;
+    })
+    .join('\n');
+
+const getTimelineRecords = (verification: VerificationResult) => {
+  if (Array.isArray(verification.step_checks) && verification.step_checks.length > 0) {
+    return verification.step_checks.map((step) => ({
+      time: step.timestamp || 'N/A',
+      action: `${step.step_name}｜${step.status}｜信心 ${Math.round((step.confidence || 0) * 100)}%｜證據：${step.evidence}`
+    }));
+  }
+  return Array.isArray(verification.timeline) ? verification.timeline : [];
+};
 
 const SortableStepItem: React.FC<SortableStepItemProps> = ({ 
   step, 
@@ -225,6 +265,7 @@ export default function App() {
   const [isAuthReady, setIsAuthReady] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const timelineRecords = result ? getTimelineRecords(result) : [];
 
   // Auth Listener - Replaced with simple local state for Cloud Run
   useEffect(() => {
@@ -338,16 +379,20 @@ export default function App() {
   };
 
   const handleCopyTranscript = () => {
-    if (!result?.timeline) return;
-    const text = result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
+    if (!result) return;
+    const text = Array.isArray(result.step_checks) && result.step_checks.length > 0
+      ? buildStepCheckTranscript(result.step_checks)
+      : result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   const handleDownloadTranscript = () => {
-    if (!result?.timeline) return;
-    const text = result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
+    if (!result) return;
+    const text = Array.isArray(result.step_checks) && result.step_checks.length > 0
+      ? buildStepCheckTranscript(result.step_checks)
+      : result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -637,17 +682,19 @@ export default function App() {
         setTranscriptionStatus('正在準備分析 YouTube 影片...');
       }
 
+      const checklist = selectedSteps.map((title, i) => {
+        const step = standardSteps.find(s => s.title === title);
+        return {
+          step_id: step?.id || `${i + 1}`,
+          step_name: step?.title || title,
+          criteria: step?.correctAnswer || '無特定要求'
+        };
+      });
+
       const prompt = `
-        【學生選擇驗證的步驟與標準】：
-        ${selectedSteps.map((title, i) => {
-          const step = standardSteps.find(s => s.title === title);
-          return `步驟 ${i + 1}: ${title}\n- 絕對正確標準：${step?.correctAnswer || '無特定要求'}`;
-        }).join('\n\n')}
-
-        ${url ? `影片連結：${url}` : "影片已隨附於此請求中。"}
-
-        請根據上述標準分析影片。
-      `;
+請依固定流程檢核表逐項判斷，不可自由推論或自由總評。
+若沒有明確證據與時間戳，該步驟狀態必須標示為「無法判斷」。
+      `.trim();
 
       // Call Backend API for analysis
       const data = await new Promise<any>((resolve, reject) => {
@@ -703,6 +750,7 @@ export default function App() {
         
         xhr.send(JSON.stringify({
           prompt,
+          checklist,
           videoData,
           modelName: "gemini-3-flash-preview",
           studentName: user.displayName,
@@ -1340,6 +1388,59 @@ export default function App() {
                       {/* Detailed Breakdown */}
                       <div className="lg:col-span-7 space-y-8">
                         <div className="bg-white border border-zinc-200 rounded-[2.5rem] p-10 shadow-sm space-y-10">
+                          {Array.isArray(result.step_checks) && result.step_checks.length > 0 && (
+                            <div className="space-y-6">
+                              <div className="flex items-center justify-between gap-3 flex-wrap">
+                                <h4 className="text-sm font-black text-zinc-900 uppercase tracking-widest flex items-center gap-3">
+                                  <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center">
+                                    <ClipboardCheck className="w-4 h-4 text-indigo-600" />
+                                  </div>
+                                  固定流程檢核
+                                </h4>
+                                <div className="flex items-center gap-2 text-[11px] font-bold text-zinc-500">
+                                  <span className="px-2 py-1 rounded-lg bg-zinc-100 border border-zinc-200">明確完成 {result.statusCounts?.['明確完成'] ?? 0}</span>
+                                  <span className="px-2 py-1 rounded-lg bg-zinc-100 border border-zinc-200">可能完成 {result.statusCounts?.['可能完成'] ?? 0}</span>
+                                  <span className="px-2 py-1 rounded-lg bg-zinc-100 border border-zinc-200">無法判斷 {result.statusCounts?.['無法判斷'] ?? 0}</span>
+                                  <span className="px-2 py-1 rounded-lg bg-zinc-100 border border-zinc-200">明確未完成 {result.statusCounts?.['明確未完成'] ?? 0}</span>
+                                </div>
+                              </div>
+
+                              <div className="space-y-4">
+                                {result.step_checks.map((step, i) => (
+                                  <div key={`${step.step_id}-${i}`} className="bg-zinc-50 border border-zinc-200 rounded-2xl p-5 space-y-3">
+                                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                                      <div className="flex items-center gap-3">
+                                        <span className="text-xs font-black text-zinc-500 bg-white border border-zinc-200 rounded-full px-2.5 py-1">
+                                          Step {step.step_id}
+                                        </span>
+                                        <p className="text-sm font-bold text-zinc-800">{step.step_name}</p>
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <span className={`text-xs font-black px-2.5 py-1 rounded-full border ${STATUS_BADGE_STYLES[step.status]}`}>
+                                          {step.status}
+                                        </span>
+                                        <span className="text-xs font-bold text-zinc-600 bg-white border border-zinc-200 rounded-full px-2.5 py-1">
+                                          信心值 {Math.round((step.confidence || 0) * 100)}%
+                                        </span>
+                                        <span className="text-xs font-bold text-zinc-600 bg-white border border-zinc-200 rounded-full px-2.5 py-1">
+                                          時間 {step.timestamp || 'N/A'}
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <p className="text-sm text-zinc-700">
+                                      <span className="font-black text-zinc-500 mr-2">依據</span>
+                                      {step.evidence}
+                                    </p>
+                                    <p className="text-sm text-zinc-700">
+                                      <span className="font-black text-zinc-500 mr-2">回饋</span>
+                                      {step.feedback}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
                           <div>
                             <h4 className="text-sm font-black text-zinc-900 uppercase tracking-widest mb-6 flex items-center gap-3">
                               <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center">
@@ -1404,7 +1505,7 @@ export default function App() {
                             <div className="flex items-center gap-2">
                               <button 
                                 onClick={() => {
-                                  const text = result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
+                                  const text = timelineRecords.map(t => `[${t.time}] ${t.action}`).join('\n');
                                   navigator.clipboard.writeText(text);
                                   setCopied(true);
                                   setTimeout(() => setCopied(false), 2000);
@@ -1430,7 +1531,7 @@ export default function App() {
                           </div>
 
                           <div className="flex-1 bg-zinc-800/30 rounded-2xl p-6 text-sm text-zinc-300 leading-relaxed overflow-y-auto font-mono selection:bg-emerald-500/30 selection:text-white scrollbar-thin scrollbar-thumb-zinc-700">
-                            {result.timeline.filter(item => item.action.toLowerCase().includes(searchTerm.toLowerCase())).map((item, i) => (
+                            {timelineRecords.filter(item => item.action.toLowerCase().includes(searchTerm.toLowerCase())).map((item, i) => (
                               <div key={i} className="mb-4 hover:text-white transition-colors cursor-default group flex gap-3">
                                 <span className="text-emerald-500 font-bold select-none whitespace-nowrap">
                                   [{item.time}]
@@ -1440,7 +1541,7 @@ export default function App() {
                                 </span>
                               </div>
                             ))}
-                            {result.timeline.length === 0 && <p className="text-zinc-500 italic">無詳細時間軸紀錄</p>}
+                            {timelineRecords.length === 0 && <p className="text-zinc-500 italic">無詳細時間軸紀錄</p>}
                           </div>
                           
                           <div className="mt-6 pt-6 border-t border-zinc-800 flex items-center justify-between">
@@ -1451,7 +1552,7 @@ export default function App() {
                               </p>
                             </div>
                             <p className="text-[10px] text-zinc-600 font-medium">
-                              共 {result.timeline.length} 筆紀錄
+                              共 {timelineRecords.length} 筆紀錄
                             </p>
                           </div>
                         </div>

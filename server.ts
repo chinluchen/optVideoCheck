@@ -376,7 +376,7 @@ async function startServer() {
     console.log("收到驗證請求...");
     let tempFilePath: string | null = null;
     try {
-      const { prompt, videoData, studentName, videoUrl, storagePath, videoMimeType } = req.body;
+      const { prompt, checklist, videoData, studentName, videoUrl, storagePath, videoMimeType } = req.body;
       const apiKey = process.env.GEMINI_API_KEY;
 
       if (!apiKey) {
@@ -385,74 +385,103 @@ async function startServer() {
       }
 
       const ai = new GoogleGenAI({ apiKey });
-      
+      const allowedStatuses = ["明確完成", "可能完成", "無法判斷", "明確未完成"] as const;
+      type StepStatus = typeof allowedStatuses[number];
+      type ChecklistStep = { step_id: string; step_name: string; criteria: string };
+      type StepCheck = {
+        step_id: string;
+        step_name: string;
+        status: StepStatus;
+        confidence: number;
+        evidence: string;
+        timestamp: string;
+        feedback: string;
+      };
+
+      const statusWeight: Record<StepStatus, number> = {
+        明確完成: 1,
+        可能完成: 0.6,
+        無法判斷: 0.2,
+        明確未完成: 0
+      };
+
+      const normalizeChecklist = (rawChecklist: any[]): ChecklistStep[] => {
+        return rawChecklist
+          .map((item, index) => {
+            const stepId = String(item?.step_id ?? item?.id ?? `${index + 1}`).trim();
+            const stepName = String(item?.step_name ?? item?.title ?? "").trim();
+            const criteria = String(item?.criteria ?? item?.correctAnswer ?? "無特定要求").trim();
+            if (!stepName) return null;
+            return {
+              step_id: stepId || `${index + 1}`,
+              step_name: stepName,
+              criteria: criteria || "無特定要求"
+            };
+          })
+          .filter(Boolean) as ChecklistStep[];
+      };
+
+      let checklistItems = normalizeChecklist(Array.isArray(checklist) ? checklist : []);
+      if (checklistItems.length === 0) {
+        const fallbackSteps = await firestore.collection('steps').orderBy('createdAt', 'asc').get();
+        checklistItems = fallbackSteps.docs
+          .map((doc, index) => {
+            const data = doc.data() as any;
+            const stepName = typeof data?.title === "string" ? data.title.trim() : "";
+            if (!stepName) return null;
+            return {
+              step_id: doc.id || `${index + 1}`,
+              step_name: stepName,
+              criteria: typeof data?.correctAnswer === "string" && data.correctAnswer.trim() ? data.correctAnswer.trim() : "無特定要求"
+            };
+          })
+          .filter(Boolean) as ChecklistStep[];
+      }
+
+      if (checklistItems.length === 0) {
+        return res.status(400).json({ error: "找不到可用的檢核步驟，請先設定步驟後再分析。" });
+      }
+
+      const checklistText = checklistItems
+        .map((step, index) => `步驟 ${index + 1}\nstep_id: ${step.step_id}\nstep_name: ${step.step_name}\ncriteria: ${step.criteria}`)
+        .join("\n\n");
+
       const systemInstruction = `
-        # 角色設定
-        你是一位專業且嚴謹的台灣「視光系臨床實驗課教授」。你的任務是針對學生上傳的驗光操作影片（例如：綜合檢查儀 Phoropter 操作、遮蓋測試等）進行精確的動作紀錄與評分。
+你是台灣視光實驗課的檢核助教。你的唯一任務是依固定檢核表逐項判斷，禁止自由總評或自由打分。
 
-        # 核心分析原則（防止幻覺）
-        1. **視覺優先原則**：僅紀錄影片中「肉眼清晰可見」的動作。若畫面模糊或角度受限看不清刻度，必須標註「進行旋鈕調整，具體數值不明」，絕對禁止根據常理推測或編造未發生的動作（例如：未見撤除稜鏡動作，禁止自行補上紀錄）。
-        2. **禁止過度推理**：除非學生在影片中有口頭說明（如：「現在置入稜鏡」），否則請描述「物理動作」（如：「手部轉動上方旋鈕」）而非「功能意圖」。
-        3. **時間軸精確性**：
-           - 每一筆紀錄必須附上精確的時間戳記 [分:秒]。
-           - 你必須完整分析至影片的最後一秒。輸出的最後一筆紀錄必須對應影片結束前的最終畫面，不可在影片中途停止分析。
-        4. **術語規範**：必須使用台灣視光界慣用術語（如：球面度、散光軸度、交叉圓柱鏡 JCC、遮蓋去遮蓋測試）。
-
-        # 任務流程
-        1. **客觀時間軸紀錄**：以條列式列出影片中發生的所有關鍵動作與對話。
-        2. **專業評分**：根據操作規範給予 0-100 的分數。
-        3. **優缺點分析**：指出 2 個優點與 2 個具體改進建議。
-
-        # 輸出格式
-        必須嚴格以 JSON 格式回傳，結構如下：
-        {
-          "score": number,
-          "summary": "總結評價",
-          "timeline": [
-            {"time": "mm:ss", "action": "動作描述"}
-          ],
-          "strengths": ["優點1", "優點2"],
-          "weaknesses": ["改進點1", "改進點2"],
-          "advice": "給學生的親切溫馨提醒"
-        }
-
-        # 語氣要求
-        回覆口氣要親切、專業且具備指導意義。請以「同學你好，我是助教，我已經看完你的操作影片了」作為開頭（放在 advice 或 summary 中）。
-
-        # 強制反幻覺規範（務必遵守）
-        1. 嚴禁補齊或推測未看到的步驟。看不清楚時只能寫「畫面不足，無法確認」。
-        2. 只有在畫面清楚可見時，才可描述具體度數、軸度、稜鏡等精細參數。
-        3. 每一個 timeline 項目都必須附上 evidence 與 confidence：
-           - evidence 只能是 visual / audio / both / unclear
-           - confidence 是 0~1 之間數字
-        4. confidence < 0.6 時，action 必須採保守描述，不可下定論。
+嚴格規則（務必遵守）：
+1. 每一個步驟都必須輸出：step_id, step_name, status, confidence, evidence, timestamp, feedback。
+2. status 只能是：明確完成、可能完成、無法判斷、明確未完成。
+3. 若影片/逐字稿沒有明確證據，status 必須是「無法判斷」，不得推論成已完成。
+4. 若無法提供 timestamp 或 evidence，不得將 status 設為「明確完成」。
+5. 只允許描述看得到/聽得到的事實，不可補全未發生動作。
+6. confidence 必須為 0~1。
+7. timestamp 格式請使用 mm:ss；若沒有明確時間，填 "N/A"。
+8. 回傳格式必須是 JSON，頂層僅輸出 step_checks 陣列。
       `;
 
       const responseSchema = {
         type: "object",
         properties: {
-          score: { type: "number", minimum: 0, maximum: 100 },
-          summary: { type: "string" },
-          timeline: {
+          step_checks: {
             type: "array",
-            minItems: 1,
+            minItems: checklistItems.length,
             items: {
               type: "object",
               properties: {
-                time: { type: "string", description: "mm:ss" },
-                action: { type: "string" },
-                evidence: { type: "string", enum: ["visual", "audio", "both", "unclear"] },
-                confidence: { type: "number", minimum: 0, maximum: 1 }
+                step_id: { type: "string" },
+                step_name: { type: "string" },
+                status: { type: "string", enum: [...allowedStatuses] },
+                confidence: { type: "number", minimum: 0, maximum: 1 },
+                evidence: { type: "string" },
+                timestamp: { type: "string" },
+                feedback: { type: "string" }
               },
-              required: ["time", "action", "evidence", "confidence"]
+              required: ["step_id", "step_name", "status", "confidence", "evidence", "timestamp", "feedback"]
             }
-          },
-          strengths: { type: "array", minItems: 2, maxItems: 4, items: { type: "string" } },
-          weaknesses: { type: "array", minItems: 2, maxItems: 4, items: { type: "string" } },
-          advice: { type: "string" },
-          uncertainties: { type: "array", items: { type: "string" } }
+          }
         },
-        required: ["score", "summary", "timeline", "strengths", "weaknesses", "advice"]
+        required: ["step_checks"]
       };
 
       const toSeconds = (timeLike: string): number | null => {
@@ -472,47 +501,158 @@ async function startServer() {
         return `${mm}:${ss}`;
       };
 
-      const sanitizeAnalysisResult = (raw: any, duration: number | null) => {
-        const sourceTimeline = Array.isArray(raw?.timeline) ? raw.timeline : [];
-        const timeline = sourceTimeline
-          .map((item: any) => {
-            const rawAction = typeof item?.action === "string" ? item.action.trim() : "";
-            if (!rawAction) return null;
+      const normalizeStatus = (rawStatus: any): StepStatus => {
+        const value = typeof rawStatus === "string" ? rawStatus.trim() : "";
+        if ((allowedStatuses as readonly string[]).includes(value)) return value as StepStatus;
+        if (value.includes("完成") && !value.includes("未")) return "可能完成";
+        if (value.includes("未完成")) return "明確未完成";
+        if (value.includes("無法") || value.includes("不確定") || value.includes("不明")) return "無法判斷";
+        return "無法判斷";
+      };
 
-            const evidence = typeof item?.evidence === "string" ? item.evidence : "unclear";
-            const confidenceNum = Number(item?.confidence);
-            const confidence = Number.isFinite(confidenceNum) ? Math.max(0, Math.min(1, confidenceNum)) : 0.5;
+      const normalizeTimestamp = (timeLike: any, duration: number | null): string => {
+        if (typeof timeLike !== "string") return "N/A";
+        let seconds = toSeconds(timeLike.trim());
+        if (seconds === null) {
+          const match = timeLike.match(/(\d{1,2}):(\d{2})/);
+          if (match) {
+            seconds = toSeconds(`${match[1]}:${match[2]}`);
+          }
+        }
+        if (seconds === null) return "N/A";
+        if (duration !== null) seconds = Math.min(seconds, Math.max(0, duration));
+        return toMMSS(seconds);
+      };
 
-            let seconds = toSeconds(item?.time);
-            if (seconds === null) seconds = 0;
-            if (duration !== null) seconds = Math.min(seconds, Math.max(0, duration));
-            const time = toMMSS(seconds);
+      const defaultFeedbackByStatus: Record<StepStatus, string> = {
+        明確完成: "此步驟有明確證據且時間點清楚，請維持目前操作。",
+        可能完成: "有部分跡象，但證據仍不足，建議補充更清晰畫面或口述。",
+        無法判斷: "目前缺乏明確證據或時間點，無法判定是否完成。",
+        明確未完成: "可明確看出此步驟未完成，請依標準流程補強。"
+      };
 
-            let action = rawAction;
-            if (confidence < 0.6 || evidence === "unclear") {
-              action = action.includes("畫面不足，無法確認") ? action : `畫面不足，無法確認：${action}`;
-            }
+      const sanitizeSingleStep = (source: any, checklistStep: ChecklistStep, duration: number | null): StepCheck => {
+        let status = normalizeStatus(source?.status);
+        const confidenceNum = Number(source?.confidence);
+        const confidence = Number.isFinite(confidenceNum) ? Math.max(0, Math.min(1, confidenceNum)) : 0;
+        const evidenceRaw = typeof source?.evidence === "string" ? source.evidence.trim() : "";
+        const evidence = evidenceRaw || "未提供明確證據";
+        const timestamp = normalizeTimestamp(source?.timestamp, duration);
+        const hasTimestamp = timestamp !== "N/A";
+        const hasEvidence = evidence !== "未提供明確證據";
+        const evidenceSignalsUnclear = /(無法判斷|看不清|不清楚|不確定|畫面不足|未提供|unclear|insufficient)/i.test(evidence);
 
-            return { time, action, evidence, confidence };
-          })
-          .filter(Boolean) as Array<{ time: string; action: string; evidence: string; confidence: number }>;
+        if (!hasEvidence || evidenceSignalsUnclear) {
+          status = "無法判斷";
+        }
+        if (status === "明確完成" && (!hasTimestamp || !hasEvidence || confidence < 0.75)) {
+          status = hasEvidence && hasTimestamp ? "可能完成" : "無法判斷";
+        }
 
-        const cleanedTimeline = timeline.length > 0 ? timeline : [{ time: "00:00", action: "畫面不足，無法確認：無足夠可見資訊可建立時間軸。", evidence: "unclear", confidence: 0 }];
+        const feedbackRaw = typeof source?.feedback === "string" ? source.feedback.trim() : "";
+        const feedback = feedbackRaw || defaultFeedbackByStatus[status];
 
-        const scoreNum = Number(raw?.score);
-        const score = Number.isFinite(scoreNum) ? Math.max(0, Math.min(100, Math.round(scoreNum))) : 0;
-        const strengths = Array.isArray(raw?.strengths) ? raw.strengths.filter((s: any) => typeof s === "string" && s.trim()).slice(0, 4) : [];
-        const weaknesses = Array.isArray(raw?.weaknesses) ? raw.weaknesses.filter((s: any) => typeof s === "string" && s.trim()).slice(0, 4) : [];
-        const uncertainties = Array.isArray(raw?.uncertainties) ? raw.uncertainties.filter((s: any) => typeof s === "string" && s.trim()).slice(0, 8) : [];
+        return {
+          step_id: checklistStep.step_id,
+          step_name: checklistStep.step_name,
+          status,
+          confidence,
+          evidence,
+          timestamp,
+          feedback
+        };
+      };
+
+      const validateRawShape = (raw: any) => {
+        if (!raw || typeof raw !== "object") return false;
+        if (!Array.isArray(raw.step_checks)) return false;
+        if (raw.step_checks.length === 0) return false;
+        return raw.step_checks.every((item: any) =>
+          item &&
+          typeof item === "object" &&
+          "step_id" in item &&
+          "step_name" in item &&
+          "status" in item &&
+          "confidence" in item &&
+          "evidence" in item &&
+          "timestamp" in item &&
+          "feedback" in item
+        );
+      };
+
+      const buildFinalResult = (raw: any, duration: number | null) => {
+        const sourceSteps = Array.isArray(raw?.step_checks) ? raw.step_checks : [];
+        const sourceById = new Map<string, any>();
+        const sourceByName = new Map<string, any>();
+
+        for (const item of sourceSteps) {
+          if (!item || typeof item !== "object") continue;
+          const idKey = typeof item.step_id === "string" ? item.step_id.trim() : "";
+          const nameKey = typeof item.step_name === "string" ? item.step_name.trim().toLowerCase() : "";
+          if (idKey && !sourceById.has(idKey)) sourceById.set(idKey, item);
+          if (nameKey && !sourceByName.has(nameKey)) sourceByName.set(nameKey, item);
+        }
+
+        const step_checks = checklistItems.map((step) => {
+          const source = sourceById.get(step.step_id) || sourceByName.get(step.step_name.toLowerCase()) || null;
+          return sanitizeSingleStep(source, step, duration);
+        });
+
+        const statusCounts: Record<StepStatus, number> = {
+          明確完成: 0,
+          可能完成: 0,
+          無法判斷: 0,
+          明確未完成: 0
+        };
+
+        let weighted = 0;
+        for (const step of step_checks) {
+          statusCounts[step.status] += 1;
+          weighted += statusWeight[step.status] * step.confidence;
+        }
+
+        const totalSteps = Math.max(step_checks.length, 1);
+        const score = Math.max(0, Math.min(100, Math.round((weighted / totalSteps) * 100)));
+        const completionRate = Math.round((statusCounts["明確完成"] / totalSteps) * 100);
+
+        const strengths = step_checks
+          .filter((step) => step.status === "明確完成" || step.status === "可能完成")
+          .slice(0, 4)
+          .map((step) => `${step.step_name}：${step.feedback}`);
+
+        const weaknesses = step_checks
+          .filter((step) => step.status === "無法判斷" || step.status === "明確未完成")
+          .slice(0, 4)
+          .map((step) => `${step.step_name}：${step.feedback}`);
+
+        const summary = `本次依固定流程檢核 ${step_checks.length} 步：明確完成 ${statusCounts["明確完成"]} 步、可能完成 ${statusCounts["可能完成"]} 步、無法判斷 ${statusCounts["無法判斷"]} 步、明確未完成 ${statusCounts["明確未完成"]} 步。`;
+
+        const adviceParts = [
+          "同學你好，我是助教，我已經看完你的操作影片了。",
+          `本次明確完成率為 ${completionRate}%。`,
+          statusCounts["無法判斷"] > 0
+            ? "有部分步驟缺少可驗證證據，建議補強拍攝角度、光線與口述。"
+            : "大多數步驟已有可驗證證據，請持續保持。",
+          statusCounts["明確未完成"] > 0
+            ? "請優先針對「明確未完成」的步驟再次練習並重新上傳。"
+            : "目前未發現明確未完成步驟。"
+        ];
+
+        const timeline = step_checks.map((step) => ({
+          time: step.timestamp === "N/A" ? "00:00" : step.timestamp,
+          action: `${step.step_name}｜${step.status}｜證據：${step.evidence}`
+        }));
 
         return {
           score,
-          summary: typeof raw?.summary === "string" && raw.summary.trim() ? raw.summary.trim() : "同學你好，我是助教，我已經看完你的操作影片了。整體上可再加強可觀察細節與步驟完整性。",
-          timeline: cleanedTimeline.map(({ time, action }) => ({ time, action })),
-          strengths: strengths.length > 0 ? strengths : ["有完成部分可見操作流程", "整體操作態度尚可"],
-          weaknesses: weaknesses.length > 0 ? weaknesses : ["部分畫面可見度不足", "部分步驟缺少可確認證據"],
-          advice: typeof raw?.advice === "string" && raw.advice.trim() ? raw.advice.trim() : "同學你好，我是助教，我已經看完你的操作影片了。建議下次拍攝時調整角度與光線，讓關鍵操作更清楚。",
-          uncertainties
+          summary,
+          timeline,
+          strengths: strengths.length > 0 ? strengths : ["目前沒有足夠證據可判定為明確完成步驟。"],
+          weaknesses: weaknesses.length > 0 ? weaknesses : ["目前沒有明確未完成步驟，但仍建議持續提升畫面可判讀性。"],
+          advice: adviceParts.join(" "),
+          step_checks,
+          statusCounts,
+          checklistVersion: "fixed-v1"
         };
       };
 
@@ -562,7 +702,7 @@ async function startServer() {
         }
       }
 
-      let contents: any;
+      let contents: any[] = [];
 
       if (storagePath) {
         const extension = path.extname(storagePath) || '.mp4';
@@ -587,10 +727,7 @@ async function startServer() {
           console.warn("雲端影片長度偵測失敗:", e);
         }
 
-        contents = [
-          await uploadFileToGeminiAndBuildPart(tempFilePath, effectiveMimeType),
-          { text: prompt || "請分析這段操作影片並給予建議。" }
-        ];
+        contents = [await uploadFileToGeminiAndBuildPart(tempFilePath, effectiveMimeType)];
       } else if (videoData && videoData.inlineData) {
         const base64Data = videoData.inlineData.data;
         const mimeType = videoData.inlineData.mimeType;
@@ -618,54 +755,79 @@ async function startServer() {
             console.warn("本地影片長度偵測失敗:", e);
           }
 
-          contents = [
-            await uploadFileToGeminiAndBuildPart(tempFilePath, mimeType),
-            { text: prompt || "請分析這段操作影片並給予建議。" }
-          ];
+          contents = [await uploadFileToGeminiAndBuildPart(tempFilePath, mimeType)];
         } else {
           console.log("影片較小，使用 inlineData 分析...");
-          contents = [videoData, { text: prompt || "請分析這段操作影片並給予建議。" }];
+          contents = [videoData];
         }
       } else if (videoUrl && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'))) {
         // Avoid Gemini direct YouTube fileData path because it can return PERMISSION_DENIED
         // for non-public links and break the entire flow.
         contents = [
           {
-            text: `${prompt || "請分析這段 YouTube 影片並給予建議。"}\n\n【YouTube 連結】${videoUrl}`
+            text: `【YouTube 連結】${videoUrl}\n（提醒：若無法直接取用影片內容，請只輸出無法判斷，不可推論。）`
           }
         ];
       } else {
-        contents = [{ text: prompt }];
+        contents = [];
       }
 
       const finalPrompt = `
-        ${prompt}
-        ${durationSeconds ? `【影片資訊】：本影片總長度為 ${durationSeconds} 秒。請務必分析至最後一秒，並在 timeline 中紀錄最後的動作。` : ""}
-        【重要】若證據不足，請明確輸出「畫面不足，無法確認」，不要推測補全。
+【固定流程檢核表】：
+${checklistText}
+
+${durationSeconds ? `【影片資訊】影片總長度約 ${durationSeconds} 秒。請分析至最後一秒。` : ""}
+${videoUrl ? `【來源資訊】${videoUrl}` : ""}
+${prompt ? `【使用者補充】${prompt}` : ""}
+
+請你逐項輸出 step_checks，不要輸出總評、不要輸出分數。
+若無法提供證據或時間戳，該步驟 status 必須是「無法判斷」。
+只回傳合法 JSON。
       `;
 
-      const result = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [{ role: "user", parts: [...(Array.isArray(contents) ? contents : [contents]), { text: finalPrompt }] }],
-        config: { 
-          systemInstruction,
-          responseMimeType: "application/json", 
-          responseSchema,
-          temperature: 0
+      const runModelWithRetry = async () => {
+        let lastError = "";
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const retryInstruction = attempt === 1
+            ? ""
+            : "你上一版輸出不符合 JSON schema。請只輸出合法 JSON，且每一項都含 step_id, step_name, status, confidence, evidence, timestamp, feedback。";
+
+          const result = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: [{ role: "user", parts: [...contents, { text: `${finalPrompt}\n${retryInstruction}`.trim() }] }],
+            config: {
+              systemInstruction,
+              responseMimeType: "application/json",
+              responseSchema,
+              temperature: 0
+            }
+          });
+
+          if (!result.candidates || result.candidates.length === 0) {
+            lastError = "Gemini 未能生成任何結果";
+            continue;
+          }
+
+          let text = (result.text || "{}").replace(/```json/g, "").replace(/```/g, "").trim();
+          if (!text) text = "{}";
+
+          try {
+            const raw = JSON.parse(text);
+            if (!validateRawShape(raw)) {
+              lastError = "schema 驗證失敗";
+              continue;
+            }
+            return raw;
+          } catch (parseError: any) {
+            lastError = parseError?.message || "JSON 解析失敗";
+          }
         }
-      });
+        throw new Error(`AI 回傳格式不符合 schema，請稍後再試。${lastError ? ` (${lastError})` : ""}`);
+      };
 
-      if (!result.candidates || result.candidates.length === 0) {
-        throw new Error("Gemini 未能生成任何結果，請稍後再試。");
-      }
-
-      let text = result.text || "{}";
+      const rawAnalysisResult = await runModelWithRetry();
       console.log("Gemini 分析完成，正在解析結果...");
-      
-      text = text.replace(/```json/g, "").replace(/```/g, "").trim();
-
-      const rawAnalysisResult = JSON.parse(text);
-      const analysisResult = sanitizeAnalysisResult(rawAnalysisResult, durationSeconds);
+      const analysisResult = buildFinalResult(rawAnalysisResult, durationSeconds);
 
       console.log("正在儲存至 Firestore...");
       await firestore.collection('submissions').add({
