@@ -87,6 +87,7 @@ interface VerificationResult {
   strengths: string[];
   weaknesses: string[];
   advice: string;
+  transcript?: string;
   step_checks?: StepCheckResult[];
   statusCounts?: Partial<Record<StepStatus, number>>;
   checklistVersion?: string;
@@ -111,22 +112,36 @@ const STATUS_BADGE_STYLES: Record<StepStatus, string> = {
   '明確未完成': 'bg-red-100 text-red-700 border-red-200'
 };
 
-const buildStepCheckTranscript = (stepChecks: StepCheckResult[]) =>
-  stepChecks
-    .map((step) => {
-      const confidence = Number.isFinite(step.confidence) ? Math.round(step.confidence * 100) : 0;
-      return `[${step.timestamp || 'N/A'}] ${step.step_name}｜${step.status}｜信心 ${confidence}%｜證據：${step.evidence}`;
-    })
-    .join('\n');
+const parseTimeToSeconds = (timeText: string) => {
+  const match = timeText.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return Number.POSITIVE_INFINITY;
+  return Number(match[1]) * 60 + Number(match[2]);
+};
 
-const getTimelineRecords = (verification: VerificationResult) => {
-  if (Array.isArray(verification.step_checks) && verification.step_checks.length > 0) {
-    return verification.step_checks.map((step) => ({
-      time: step.timestamp || 'N/A',
-      action: `${step.step_name}｜${step.status}｜信心 ${Math.round((step.confidence || 0) * 100)}%｜證據：${step.evidence}`
-    }));
+const buildTranscriptRows = (transcriptText: string) => {
+  const rawText = (transcriptText || '').trim();
+  if (!rawText) return [] as Array<{ time: string; text: string }>;
+
+  const lines = rawText.split('\n').map(line => line.trim()).filter(Boolean);
+  const timestampPattern = /^\[?(\d{1,2}:\d{2})\]?\s*(.*)$/;
+  const hasTimestamp = lines.some(line => timestampPattern.test(line));
+
+  if (!hasTimestamp) {
+    return [{ time: '全文', text: rawText }];
   }
-  return Array.isArray(verification.timeline) ? verification.timeline : [];
+
+  const rows = lines.map((line, index) => {
+    const match = line.match(timestampPattern);
+    if (!match) {
+      return { time: 'N/A', text: line, order: Number.POSITIVE_INFINITY + index };
+    }
+    const time = match[1];
+    const text = match[2] || '';
+    return { time, text, order: parseTimeToSeconds(time) + index / 1000 };
+  });
+
+  rows.sort((a, b) => a.order - b.order);
+  return rows.map(({ time, text }) => ({ time, text }));
 };
 
 const SortableStepItem: React.FC<SortableStepItemProps> = ({ 
@@ -265,7 +280,8 @@ export default function App() {
   const [isAuthReady, setIsAuthReady] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const timelineRecords = result ? getTimelineRecords(result) : [];
+  const transcriptText = result?.transcript?.trim() || '';
+  const transcriptRows = transcriptText ? buildTranscriptRows(transcriptText) : [];
 
   // Auth Listener - Replaced with simple local state for Cloud Run
   useEffect(() => {
@@ -379,25 +395,19 @@ export default function App() {
   };
 
   const handleCopyTranscript = () => {
-    if (!result) return;
-    const text = Array.isArray(result.step_checks) && result.step_checks.length > 0
-      ? buildStepCheckTranscript(result.step_checks)
-      : result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
-    navigator.clipboard.writeText(text);
+    if (!transcriptText) return;
+    navigator.clipboard.writeText(transcriptText);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   const handleDownloadTranscript = () => {
-    if (!result) return;
-    const text = Array.isArray(result.step_checks) && result.step_checks.length > 0
-      ? buildStepCheckTranscript(result.step_checks)
-      : result.timeline.map(t => `[${t.time}] ${t.action}`).join('\n');
-    const blob = new Blob([text], { type: 'text/plain' });
+    if (!transcriptText) return;
+    const blob = new Blob([transcriptText], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `timeline_${new Date().getTime()}.txt`;
+    a.download = `transcript_${new Date().getTime()}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -658,6 +668,7 @@ export default function App() {
     try {
       let finalVideoUrl = url.trim();
       let videoData: any = null;
+      let actualTranscript = '';
 
       if (videoFile) {
         setTranscriptionStatus('正在讀取上傳影片...');
@@ -680,6 +691,46 @@ export default function App() {
         setTranscriptionStatus('影片已讀取，準備 AI 分析...');
       } else {
         setTranscriptionStatus('正在準備分析 YouTube 影片...');
+      }
+
+      if (url.trim()) {
+        try {
+          setTranscriptionStatus('正在啟動語音逐字稿辨識...');
+          const transcribeRes = await fetch('/api/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ videoUrl: url.trim() })
+          });
+
+          if (!transcribeRes.ok) throw new Error('無法啟動語音逐字稿辨識');
+
+          const { id } = await transcribeRes.json();
+          let status = 'pending';
+          let attempts = 0;
+          const maxAttempts = 60;
+
+          while ((status === 'pending' || status === 'processing') && attempts < maxAttempts) {
+            attempts++;
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            const pollRes = await fetch(`/api/transcription/${id}`);
+            if (!pollRes.ok) throw new Error('逐字稿狀態查詢失敗');
+            const pollData = await pollRes.json();
+            status = pollData.status;
+
+            if (status === 'pending' || status === 'processing') {
+              setTranscriptionStatus('正在辨識語音並轉成文字...');
+            } else if (status === 'completed') {
+              actualTranscript = typeof pollData.transcript === 'string' ? pollData.transcript : '';
+              setTranscriptionStatus('逐字稿辨識完成，準備流程檢核...');
+            } else if (status === 'failed') {
+              console.warn('STT transcription failed:', pollData.error);
+              setTranscriptionStatus('逐字稿辨識失敗，改以流程檢核結果呈現');
+            }
+          }
+        } catch (transcriptErr) {
+          console.warn('STT transcription error:', transcriptErr);
+          setTranscriptionStatus('逐字稿辨識失敗，改以流程檢核結果呈現');
+        }
       }
 
       const checklist = selectedSteps.map((title, i) => {
@@ -758,6 +809,10 @@ export default function App() {
           studentUid: user.uid
         }));
       });
+
+      if (!data.transcript && actualTranscript) {
+        data.transcript = actualTranscript;
+      }
 
       setResult(data);
       setTranscriptionStatus(null);
@@ -1500,20 +1555,22 @@ export default function App() {
                           <div className="flex items-center justify-between mb-6">
                             <div className="flex items-center gap-2">
                               <RefreshCw className="w-4 h-4 text-emerald-400 animate-spin-slow" />
-                              <h4 className="text-xs font-black text-zinc-400 uppercase tracking-widest">客觀操作時間軸紀錄</h4>
+                              <h4 className="text-xs font-black text-zinc-400 uppercase tracking-widest">完整揭露語音逐字稿</h4>
                             </div>
                             <div className="flex items-center gap-2">
                               <button 
-                                onClick={() => {
-                                  const text = timelineRecords.map(t => `[${t.time}] ${t.action}`).join('\n');
-                                  navigator.clipboard.writeText(text);
-                                  setCopied(true);
-                                  setTimeout(() => setCopied(false), 2000);
-                                }}
+                                onClick={handleCopyTranscript}
                                 className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400 hover:text-white"
-                                title="複製紀錄"
+                                title="複製逐字稿"
                               >
                                 {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                              </button>
+                              <button 
+                                onClick={handleDownloadTranscript}
+                                className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400 hover:text-white"
+                                title="下載逐字稿"
+                              >
+                                <Download className="w-4 h-4" />
                               </button>
                             </div>
                           </div>
@@ -1523,7 +1580,7 @@ export default function App() {
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
                             <input 
                               type="text"
-                              placeholder="搜尋紀錄..."
+                              placeholder="搜尋逐字稿..."
                               value={searchTerm}
                               onChange={(e) => setSearchTerm(e.target.value)}
                               className="w-full bg-zinc-800/50 border border-zinc-700/50 rounded-xl pl-9 pr-4 py-2 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-emerald-500/50 transition-all"
@@ -1531,28 +1588,30 @@ export default function App() {
                           </div>
 
                           <div className="flex-1 bg-zinc-800/30 rounded-2xl p-6 text-sm text-zinc-300 leading-relaxed overflow-y-auto font-mono selection:bg-emerald-500/30 selection:text-white scrollbar-thin scrollbar-thumb-zinc-700">
-                            {timelineRecords.filter(item => item.action.toLowerCase().includes(searchTerm.toLowerCase())).map((item, i) => (
+                            {transcriptRows
+                              .filter(item => `${item.time} ${item.text}`.toLowerCase().includes(searchTerm.toLowerCase()))
+                              .map((item, i) => (
                               <div key={i} className="mb-4 hover:text-white transition-colors cursor-default group flex gap-3">
                                 <span className="text-emerald-500 font-bold select-none whitespace-nowrap">
                                   [{item.time}]
                                 </span>
                                 <span className="flex-1 text-zinc-300 group-hover:text-white transition-colors">
-                                  {item.action}
+                                  {item.text}
                                 </span>
                               </div>
                             ))}
-                            {timelineRecords.length === 0 && <p className="text-zinc-500 italic">無詳細時間軸紀錄</p>}
+                            {transcriptRows.length === 0 && <p className="text-zinc-500 italic">無語音逐字稿</p>}
                           </div>
                           
                           <div className="mt-6 pt-6 border-t border-zinc-800 flex items-center justify-between">
                             <div className="flex items-center gap-2">
                               <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                               <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-tighter">
-                                動作分析完成
+                                語音逐字稿就緒
                               </p>
                             </div>
                             <p className="text-[10px] text-zinc-600 font-medium">
-                              共 {timelineRecords.length} 筆紀錄
+                              {transcriptText ? `${transcriptText.length} 字元` : '0 字元'}
                             </p>
                           </div>
                         </div>
