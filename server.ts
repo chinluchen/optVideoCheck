@@ -193,6 +193,39 @@ async function processTranscription(id: string, videoUrl: string) {
   }
 }
 
+async function transcribeLocalVideoWithWhisper(localVideoPath: string) {
+  const openai = getOpenAIClient();
+  const tempAudioPath = path.join(tmpdir(), `verify_stt_${randomUUID()}.mp3`);
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(localVideoPath)
+        .noVideo()
+        .audioCodec("libmp3lame")
+        .audioBitrate("64k")
+        .toFormat("mp3")
+        .on("end", () => resolve())
+        .on("error", reject)
+        .save(tempAudioPath);
+    });
+
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(tempAudioPath),
+      model: "whisper-1",
+    });
+
+    return typeof transcription.text === "string" ? transcription.text.trim() : "";
+  } finally {
+    if (fs.existsSync(tempAudioPath)) {
+      try {
+        fs.unlinkSync(tempAudioPath);
+      } catch (e) {
+        console.warn("無法刪除 STT 暫存音訊檔:", e);
+      }
+    }
+  }
+}
+
 async function startServer() {
   try {
     await migrateData();
@@ -375,6 +408,8 @@ async function startServer() {
   app.post("/api/verify", async (req, res) => {
     console.log("收到驗證請求...");
     let tempFilePath: string | null = null;
+    let sttSourceVideoPath: string | null = null;
+    let transcriptText = "";
     try {
       const { prompt, checklist, videoData, studentName, videoUrl, storagePath, videoMimeType } = req.body;
       const apiKey = process.env.GEMINI_API_KEY;
@@ -620,7 +655,7 @@ async function startServer() {
         );
       };
 
-      const buildFinalResult = (raw: any, duration: number | null) => {
+      const buildFinalResult = (raw: any, duration: number | null, transcript: string = "") => {
         const sourceSteps = Array.isArray(raw?.step_checks) ? raw.step_checks : [];
         const sourceById = new Map<string, any>();
         const sourceByName = new Map<string, any>();
@@ -686,6 +721,7 @@ async function startServer() {
         return {
           score,
           summary,
+          transcript,
           timeline,
           strengths: strengths.length > 0 ? strengths : ["目前沒有足夠證據可判定為明確完成步驟。"],
           weaknesses: weaknesses.length > 0 ? weaknesses : ["目前沒有明確未完成步驟，但仍建議持續提升畫面可判讀性。"],
@@ -696,7 +732,7 @@ async function startServer() {
         };
       };
 
-      const buildUnableToJudgeResult = (reason: string, duration: number | null) => {
+      const buildUnableToJudgeResult = (reason: string, duration: number | null, transcript: string = "") => {
         const raw = {
           step_checks: checklistItems.map((step) => ({
             step_id: step.step_id,
@@ -708,7 +744,7 @@ async function startServer() {
             feedback: "來源資料不足，系統依規則不得推論完成。"
           }))
         };
-        return buildFinalResult(raw, duration);
+        return buildFinalResult(raw, duration, transcript);
       };
 
       const downloadYoutubeToTempFile = async (targetUrl: string) => {
@@ -775,6 +811,7 @@ async function startServer() {
       if (storagePath) {
         const extension = path.extname(storagePath) || '.mp4';
         tempFilePath = path.join(tmpdir(), `storage_upload_${randomUUID()}${extension}`);
+        sttSourceVideoPath = tempFilePath;
         const bucketFile = storageBucket.file(storagePath);
 
         console.log(`從 Cloud Storage 下載影片: ${storagePath}`);
@@ -805,6 +842,7 @@ async function startServer() {
           const buffer = Buffer.from(base64Data, 'base64');
           const extension = mimeType.split('/')[1] || 'mp4';
           tempFilePath = path.join(tmpdir(), `gemini_upload_${randomUUID()}.${extension}`);
+          sttSourceVideoPath = tempFilePath;
           fs.writeFileSync(tempFilePath, buffer);
           
           const stats = fs.statSync(tempFilePath);
@@ -826,12 +864,17 @@ async function startServer() {
           contents = [await uploadFileToGeminiAndBuildPart(tempFilePath, mimeType)];
         } else {
           console.log("影片較小，使用 inlineData 分析...");
+          const extension = mimeType.split('/')[1] || 'mp4';
+          tempFilePath = path.join(tmpdir(), `inline_upload_${randomUUID()}.${extension}`);
+          sttSourceVideoPath = tempFilePath;
+          fs.writeFileSync(tempFilePath, Buffer.from(base64Data, 'base64'));
           contents = [videoData];
         }
       } else if (videoUrl && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'))) {
         try {
           console.log("YouTube 驗證：嘗試先下載影片再送 AI 分析...");
           tempFilePath = await downloadYoutubeToTempFile(videoUrl);
+          sttSourceVideoPath = tempFilePath;
           try {
             const metadata: any = await new Promise((resolve, reject) => {
               ffmpeg.ffprobe(tempFilePath!, (err, data) => {
@@ -850,7 +893,8 @@ async function startServer() {
           console.warn("YouTube 下載失敗，改為保守輸出無法判斷:", ytError?.message || ytError);
           const fallbackResult = buildUnableToJudgeResult(
             "無法取得 YouTube 影片畫面（可能為權限或平台限制），系統不得推論步驟完成。",
-            durationSeconds
+            durationSeconds,
+            transcriptText
           );
           await firestore.collection('submissions').add({
             studentName: studentName || "匿名學生",
@@ -868,7 +912,8 @@ async function startServer() {
       if (contents.length === 0) {
         const fallbackResult = buildUnableToJudgeResult(
           "未取得可驗證影片內容，系統依規則只能標示為無法判斷。",
-          durationSeconds
+          durationSeconds,
+          transcriptText
         );
         await firestore.collection('submissions').add({
           studentName: studentName || "匿名學生",
@@ -880,12 +925,24 @@ async function startServer() {
         return res.json(fallbackResult);
       }
 
+      if (sttSourceVideoPath) {
+        try {
+          console.log(`開始 STT 逐字稿辨識: ${sttSourceVideoPath}`);
+          transcriptText = await transcribeLocalVideoWithWhisper(sttSourceVideoPath);
+          console.log(`STT 完成，逐字稿長度: ${transcriptText.length}`);
+        } catch (sttError: any) {
+          console.warn("STT 逐字稿辨識失敗:", sttError?.message || sttError);
+          transcriptText = "";
+        }
+      }
+
       const finalPrompt = `
 【固定流程檢核表】：
 ${checklistText}
 
 ${durationSeconds ? `【影片資訊】影片總長度約 ${durationSeconds} 秒。請分析至最後一秒。` : ""}
 ${videoUrl ? `【來源資訊】${videoUrl}` : ""}
+${transcriptText ? `【語音逐字稿（STT）】\n${transcriptText}\n` : ""}
 ${prompt ? `【使用者補充】${prompt}` : ""}
 
 請你逐項輸出 step_checks，不要輸出總評、不要輸出分數。
@@ -935,7 +992,7 @@ ${prompt ? `【使用者補充】${prompt}` : ""}
 
       const rawAnalysisResult = await runModelWithRetry();
       console.log("Gemini 分析完成，正在解析結果...");
-      const analysisResult = buildFinalResult(rawAnalysisResult, durationSeconds);
+      const analysisResult = buildFinalResult(rawAnalysisResult, durationSeconds, transcriptText);
 
       console.log("正在儲存至 Firestore...");
       await firestore.collection('submissions').add({
