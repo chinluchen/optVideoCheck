@@ -142,6 +142,32 @@ function getOpenAIClient() {
   return openaiClient;
 }
 
+function toMMSS(totalSeconds: number) {
+  const safe = Math.max(0, Math.floor(Number.isFinite(totalSeconds) ? totalSeconds : 0));
+  const mm = String(Math.floor(safe / 60)).padStart(2, "0");
+  const ss = String(safe % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+function buildTimestampedTranscript(transcription: any): string {
+  const segments = Array.isArray(transcription?.segments) ? transcription.segments : [];
+  const rows = segments
+    .map((segment: any, index: number) => {
+      const startNum = Number(segment?.start);
+      const start = Number.isFinite(startNum) ? startNum : index;
+      const text = typeof segment?.text === "string" ? segment.text.trim() : "";
+      if (!text) return null;
+      return `[${toMMSS(start)}] ${text}`;
+    })
+    .filter(Boolean) as string[];
+
+  if (rows.length > 0) return rows.join("\n");
+
+  const fallbackText = typeof transcription?.text === "string" ? transcription.text.trim() : "";
+  if (!fallbackText) return "";
+  return `[00:00] ${fallbackText}`;
+}
+
 async function processTranscription(id: string, videoUrl: string) {
   const updateStatus = async (status: string, transcript: string | null = null, error: string | null = null) => {
     await firestore.collection('transcriptions').doc(id).update({
@@ -176,12 +202,15 @@ async function processTranscription(id: string, videoUrl: string) {
         .save(tempAudioPath);
     });
 
-    const transcription = await openai.audio.transcriptions.create({
+    const transcription: any = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempAudioPath),
       model: "whisper-1",
+      response_format: "verbose_json",
+      timestamp_granularities: ["segment"],
     });
 
-    await updateStatus('completed', transcription.text);
+    const transcriptText = buildTimestampedTranscript(transcription);
+    await updateStatus('completed', transcriptText);
     console.log(`[Transcription ${id}] Completed`);
 
     if (fs.existsSync(tempAudioPath)) fs.unlinkSync(tempAudioPath);
@@ -209,12 +238,14 @@ async function transcribeLocalVideoWithWhisper(localVideoPath: string) {
         .save(tempAudioPath);
     });
 
-    const transcription = await openai.audio.transcriptions.create({
+    const transcription: any = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempAudioPath),
       model: "whisper-1",
+      response_format: "verbose_json",
+      timestamp_granularities: ["segment"],
     });
 
-    return typeof transcription.text === "string" ? transcription.text.trim() : "";
+    return buildTimestampedTranscript(transcription);
   } finally {
     if (fs.existsSync(tempAudioPath)) {
       try {
