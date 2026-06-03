@@ -168,6 +168,18 @@ function buildTimestampedTranscript(transcription: any): string {
   return `[00:00] ${fallbackText}`;
 }
 
+async function transcribeAudioFileWithWhisper(audioPath: string) {
+  const openai = getOpenAIClient();
+  const transcription: any = await openai.audio.transcriptions.create({
+    file: fs.createReadStream(audioPath),
+    model: "whisper-1",
+    response_format: "verbose_json",
+    timestamp_granularities: ["segment"],
+  });
+
+  return buildTimestampedTranscript(transcription);
+}
+
 async function processTranscription(id: string, videoUrl: string) {
   const updateStatus = async (status: string, transcript: string | null = null, error: string | null = null) => {
     await firestore.collection('transcriptions').doc(id).update({
@@ -179,7 +191,6 @@ async function processTranscription(id: string, videoUrl: string) {
   };
 
   try {
-    const openai = getOpenAIClient();
     await updateStatus('processing');
     console.log(`[Transcription ${id}] Starting for ${videoUrl}`);
 
@@ -202,14 +213,7 @@ async function processTranscription(id: string, videoUrl: string) {
         .save(tempAudioPath);
     });
 
-    const transcription: any = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempAudioPath),
-      model: "whisper-1",
-      response_format: "verbose_json",
-      timestamp_granularities: ["segment"],
-    });
-
-    const transcriptText = buildTimestampedTranscript(transcription);
+    const transcriptText = await transcribeAudioFileWithWhisper(tempAudioPath);
     await updateStatus('completed', transcriptText);
     console.log(`[Transcription ${id}] Completed`);
 
@@ -223,7 +227,6 @@ async function processTranscription(id: string, videoUrl: string) {
 }
 
 async function transcribeLocalVideoWithWhisper(localVideoPath: string) {
-  const openai = getOpenAIClient();
   const tempAudioPath = path.join(tmpdir(), `verify_stt_${randomUUID()}.mp3`);
 
   try {
@@ -238,14 +241,7 @@ async function transcribeLocalVideoWithWhisper(localVideoPath: string) {
         .save(tempAudioPath);
     });
 
-    const transcription: any = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempAudioPath),
-      model: "whisper-1",
-      response_format: "verbose_json",
-      timestamp_granularities: ["segment"],
-    });
-
-    return buildTimestampedTranscript(transcription);
+    return await transcribeAudioFileWithWhisper(tempAudioPath);
   } finally {
     if (fs.existsSync(tempAudioPath)) {
       try {
@@ -255,6 +251,245 @@ async function transcribeLocalVideoWithWhisper(localVideoPath: string) {
       }
     }
   }
+}
+
+const STANDARD_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+const STANDARD_MAX_DURATION_SECONDS = 30 * 60;
+const STANDARD_KEYFRAME_INTERVAL_SECONDS = 8;
+const STANDARD_MAX_KEYFRAMES = 10;
+
+function formatSecondsAsMMSS(totalSeconds: number) {
+  const safe = Math.max(0, Math.floor(Number.isFinite(totalSeconds) ? totalSeconds : 0));
+  const mm = String(Math.floor(safe / 60)).padStart(2, "0");
+  const ss = String(safe % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+async function getVideoDurationSeconds(videoPath: string): Promise<number | null> {
+  try {
+    const metadata: any = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(videoPath, (err, data) => {
+        if (err) reject(err);
+        else resolve(data);
+      });
+    });
+    const duration = Number(metadata?.format?.duration);
+    return Number.isFinite(duration) ? Math.round(duration) : null;
+  } catch (error) {
+    console.warn("偵測影片長度失敗:", error);
+    return null;
+  }
+}
+
+async function compressVideoForAnalysis(inputPath: string, outputPath: string) {
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .videoCodec("libx264")
+      .audioCodec("aac")
+      .audioChannels(1)
+      .audioBitrate("128k")
+      .outputOptions([
+        "-vf",
+        "scale=-2:720:force_original_aspect_ratio=decrease,fps=15",
+        "-preset",
+        "veryfast",
+        "-movflags",
+        "+faststart",
+        "-b:v",
+        "1200k",
+        "-maxrate",
+        "1500k",
+        "-bufsize",
+        "3000k",
+      ])
+      .on("end", () => resolve())
+      .on("error", reject)
+      .save(outputPath);
+  });
+}
+
+async function extractAudioForStt(inputPath: string, outputPath: string) {
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .noVideo()
+      .audioChannels(1)
+      .audioFrequency(16000)
+      .audioCodec("pcm_s16le")
+      .format("wav")
+      .on("end", () => resolve())
+      .on("error", reject)
+      .save(outputPath);
+  });
+}
+
+async function extractKeyframesForAnalysis(
+  videoPath: string,
+  durationSeconds: number | null,
+  outputDir: string
+) {
+  fs.mkdirSync(outputDir, { recursive: true });
+  const interval = durationSeconds
+    ? Math.max(5, Math.min(10, Math.round(durationSeconds / 8) || STANDARD_KEYFRAME_INTERVAL_SECONDS))
+    : STANDARD_KEYFRAME_INTERVAL_SECONDS;
+  const maxDuration = durationSeconds ?? interval;
+  const timestamps: number[] = [];
+
+  for (let current = 0; current <= maxDuration; current += interval) {
+    timestamps.push(current);
+    if (timestamps.length >= STANDARD_MAX_KEYFRAMES) break;
+  }
+
+  if (timestamps.length === 0) timestamps.push(0);
+
+  const keyframes: Array<{ path: string; timestamp: string }> = [];
+  for (let index = 0; index < timestamps.length; index++) {
+    const timestamp = timestamps[index];
+    const filename = `frame_${String(index + 1).padStart(2, "0")}_${formatSecondsAsMMSS(timestamp).replace(":", "-")}.jpg`;
+    const outputPath = path.join(outputDir, filename);
+
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(videoPath)
+        .seekInput(timestamp)
+        .frames(1)
+        .outputOptions(["-q:v", "3"])
+        .on("end", () => resolve())
+        .on("error", reject)
+        .save(outputPath);
+    });
+
+    keyframes.push({ path: outputPath, timestamp: formatSecondsAsMMSS(timestamp) });
+  }
+
+  return keyframes;
+}
+
+async function parseVerifyRequest(req: express.Request) {
+  const contentType = String(req.headers["content-type"] || "");
+  if (!contentType.includes("multipart/form-data")) {
+    return {
+      fields: (req.body || {}) as Record<string, any>,
+      uploadedVideoPath: null as string | null,
+      uploadedVideoMimeType: null as string | null,
+      uploadedVideoName: null as string | null,
+      cleanupPaths: [] as string[],
+    };
+  }
+
+  const busboyModule: any = await import("@fastify/busboy");
+  const Busboy = busboyModule.default || busboyModule;
+
+  return await new Promise<{
+    fields: Record<string, any>;
+    uploadedVideoPath: string | null;
+    uploadedVideoMimeType: string | null;
+    uploadedVideoName: string | null;
+    cleanupPaths: string[];
+  }>((resolve, reject) => {
+    const fields: Record<string, any> = {};
+    const cleanupPaths: string[] = [];
+    let uploadedVideoPath: string | null = null;
+    let uploadedVideoMimeType: string | null = null;
+    let uploadedVideoName: string | null = null;
+    let sawVideoFile = false;
+    let resolved = false;
+    let rejected = false;
+
+    const finishResolve = () => {
+      if (resolved || rejected) return;
+      resolved = true;
+      resolve({ fields, uploadedVideoPath, uploadedVideoMimeType, uploadedVideoName, cleanupPaths });
+    };
+
+    const fail = (error: any) => {
+      if (resolved || rejected) return;
+      rejected = true;
+      reject(error);
+    };
+
+    const busboy = new Busboy({
+      headers: req.headers,
+      limits: {
+        fileSize: STANDARD_MAX_UPLOAD_BYTES,
+        files: 1
+      }
+    });
+
+    busboy.on("field", (name: string, value: string) => {
+      fields[name] = value;
+    });
+
+    busboy.on("file", (name: string, file: NodeJS.ReadableStream, info: any) => {
+      if (name !== "video") {
+        file.resume();
+        return;
+      }
+
+      const fileStream: any = file;
+      sawVideoFile = true;
+      uploadedVideoMimeType = info?.mimeType || "video/mp4";
+      uploadedVideoName = info?.filename || "upload.mp4";
+      const extension = path.extname(uploadedVideoName) || `.${(uploadedVideoMimeType.split("/")[1] || "mp4")}`;
+      uploadedVideoPath = path.join(tmpdir(), `standard_upload_${randomUUID()}${extension}`);
+      cleanupPaths.push(uploadedVideoPath);
+
+      const writeStream = fs.createWriteStream(uploadedVideoPath);
+
+      file.on("limit", () => {
+        fail(new Error("檔案太大，請上傳小於 100MB 的影片"));
+        fileStream.destroy?.();
+        writeStream.destroy();
+      });
+
+      file.on("error", fail);
+      writeStream.on("error", fail);
+      writeStream.on("finish", () => finishResolve());
+      file.pipe(writeStream);
+    });
+
+    busboy.on("error", fail);
+    busboy.on("finish", () => {
+      if (!sawVideoFile) finishResolve();
+    });
+    req.pipe(busboy);
+  });
+}
+
+function buildStandardAnalysisPrompt(options: {
+  checklistText: string;
+  transcriptText: string;
+  keyframes: Array<{ path: string; timestamp: string }>;
+  durationSeconds: number | null;
+  sourceName?: string;
+}) {
+  const { checklistText, transcriptText, keyframes, durationSeconds, sourceName } = options;
+  const keyframeIndex = keyframes
+    .map((frame, index) => `- 第 ${index + 1} 張 [${frame.timestamp}] ${path.basename(frame.path)}`)
+    .join("\n");
+
+  return `
+你是台灣視光實驗課的檢核助教。你只能根據「逐字稿」、「關鍵畫面」與「固定流程檢核表」判斷，禁止自由補完未出現的流程。
+
+嚴格規則：
+1. 若沒有明確證據或時間點，status 必須是「無法判斷」。
+2. 不得推論學生已完成未明確出現的步驟。
+3. 若回傳「明確完成」但缺少 evidence 或 timestamp，後端會降級為「無法判斷」。
+4. 只能使用固定流程檢核表，不可輸出自由總評。
+5. 關鍵畫面是輔助證據，不可取代逐字稿。
+
+【來源資訊】${sourceName || "上傳影片"}
+${durationSeconds ? `【影片總長】約 ${durationSeconds} 秒` : ""}
+
+【固定流程檢核表】
+${checklistText}
+
+【STT逐字稿】
+${transcriptText || "無可用逐字稿"}
+
+【關鍵畫面索引】
+${keyframeIndex || "無可用關鍵畫面"}
+
+請輸出 step_checks 陣列，且每個步驟都必須包含 step_id, step_name, status, confidence, evidence, timestamp, feedback。
+      `.trim();
 }
 
 async function startServer() {
@@ -441,8 +676,23 @@ async function startServer() {
     let tempFilePath: string | null = null;
     let sttSourceVideoPath: string | null = null;
     let transcriptText = "";
+    const cleanupPaths: string[] = [];
     try {
-      const { prompt, checklist, videoData, studentName, videoUrl, storagePath, videoMimeType } = req.body;
+      const requestPayload = await parseVerifyRequest(req);
+      const body = requestPayload.fields || {};
+      const prompt = body.prompt;
+      const checklist = body.checklist;
+      const videoData = body.videoData;
+      const studentName = body.studentName;
+      const videoUrl = body.videoUrl;
+      const storagePath = body.storagePath;
+      const videoMimeType = body.videoMimeType;
+      const analysisMode = String(body.analysisMode || "legacy");
+      if (requestPayload.uploadedVideoPath) {
+        sttSourceVideoPath = requestPayload.uploadedVideoPath;
+        tempFilePath = requestPayload.uploadedVideoPath;
+        cleanupPaths.push(...requestPayload.cleanupPaths);
+      }
       const apiKey = process.env.GEMINI_API_KEY;
 
       if (!apiKey) {
@@ -487,7 +737,20 @@ async function startServer() {
           .filter(Boolean) as ChecklistStep[];
       };
 
-      let checklistItems = normalizeChecklist(Array.isArray(checklist) ? checklist : []);
+      const checklistSource = Array.isArray(checklist)
+        ? checklist
+        : typeof checklist === "string"
+          ? (() => {
+              try {
+                const parsed = JSON.parse(checklist);
+                return Array.isArray(parsed) ? parsed : [];
+              } catch {
+                return [];
+              }
+            })()
+          : [];
+
+      let checklistItems = normalizeChecklist(checklistSource);
       if (checklistItems.length === 0) {
         const fallbackSteps = await firestore.collection('steps').orderBy('createdAt', 'asc').get();
         checklistItems = fallbackSteps.docs
@@ -837,6 +1100,133 @@ async function startServer() {
         }
       }
 
+      if (analysisMode === "standard" && sttSourceVideoPath) {
+        console.log("開始一般分析模式流程...");
+        const sourceDuration = await getVideoDurationSeconds(sttSourceVideoPath);
+        if (sourceDuration !== null) {
+          durationSeconds = sourceDuration;
+          if (sourceDuration > STANDARD_MAX_DURATION_SECONDS) {
+            throw new Error(`影片太長，請縮短至 ${Math.floor(STANDARD_MAX_DURATION_SECONDS / 60)} 分鐘內`);
+          }
+        }
+
+        const compressedPath = path.join(tmpdir(), `standard_compressed_${randomUUID()}.mp4`);
+        const audioPath = path.join(tmpdir(), `standard_audio_${randomUUID()}.wav`);
+        const keyframeDir = path.join(tmpdir(), `standard_keyframes_${randomUUID()}`);
+        cleanupPaths.push(compressedPath, audioPath, keyframeDir);
+
+        try {
+          await compressVideoForAnalysis(sttSourceVideoPath, compressedPath);
+        } catch (error: any) {
+          throw new Error(`ffmpeg壓縮失敗：${error?.message || error}`);
+        }
+
+        try {
+          await extractAudioForStt(compressedPath, audioPath);
+        } catch (error: any) {
+          throw new Error(`音訊抽取失敗：${error?.message || error}`);
+        }
+
+        try {
+          transcriptText = await transcribeAudioFileWithWhisper(audioPath);
+        } catch (error: any) {
+          throw new Error(`STT失敗：${error?.message || error}`);
+        }
+
+        if (!transcriptText) {
+          throw new Error("STT失敗：未取得逐字稿");
+        }
+
+        let keyframes: Array<{ path: string; timestamp: string }> = [];
+        try {
+          keyframes = await extractKeyframesForAnalysis(compressedPath, durationSeconds, keyframeDir);
+        } catch (error: any) {
+          throw new Error(`關鍵畫面擷取失敗：${error?.message || error}`);
+        }
+
+        if (keyframes.length === 0) {
+          throw new Error("關鍵畫面擷取失敗：未產生任何關鍵畫面");
+        }
+
+        const standardPrompt = buildStandardAnalysisPrompt({
+          checklistText,
+          transcriptText,
+          keyframes,
+          durationSeconds,
+          sourceName: "一般分析模式"
+        });
+
+        const standardParts: any[] = [
+          { text: standardPrompt },
+          ...keyframes.map((frame) => ({
+            inlineData: {
+              data: fs.readFileSync(frame.path).toString("base64"),
+              mimeType: "image/jpeg"
+            }
+          }))
+        ];
+
+        const runStandardModelWithRetry = async () => {
+          let lastError = "";
+          for (let attempt = 1; attempt <= 2; attempt++) {
+            const retryInstruction = attempt === 1
+              ? ""
+              : "你上一版輸出不符合 JSON schema。請只輸出合法 JSON，且每一項都含 step_id, step_name, status, confidence, evidence, timestamp, feedback。";
+
+            const result = await ai.models.generateContent({
+              model: "gemini-3-flash-preview",
+              contents: [{
+                role: "user",
+                parts: [...standardParts, ...(retryInstruction ? [{ text: retryInstruction }] : [])]
+              }],
+              config: {
+                systemInstruction,
+                responseMimeType: "application/json",
+                responseSchema,
+                temperature: 0
+              }
+            });
+
+            if (!result.candidates || result.candidates.length === 0) {
+              lastError = "Gemini 未能生成任何結果";
+              continue;
+            }
+
+            let text = (result.text || "{}").replace(/```json/g, "").replace(/```/g, "").trim();
+            if (!text) text = "{}";
+
+            try {
+              const raw = JSON.parse(text);
+              if (!validateRawShape(raw)) {
+                lastError = "schema 驗證失敗";
+                continue;
+              }
+              return raw;
+            } catch (parseError: any) {
+              lastError = parseError?.message || "JSON 解析失敗";
+            }
+          }
+          throw new Error(`AI 回傳格式不符合 schema，請稍後再試。${lastError ? ` (${lastError})` : ""}`);
+        };
+
+        const rawAnalysisResult = await runStandardModelWithRetry();
+        const analysisResult = buildFinalResult(rawAnalysisResult, durationSeconds, transcriptText);
+
+        await firestore.collection('submissions').add({
+          studentName: studentName || "匿名學生",
+          videoUrl: storagePath || videoUrl || "本地上傳",
+          score: analysisResult.score || 0,
+          result: {
+            ...analysisResult,
+            analysisMode: "standard"
+          },
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        console.log("一般分析模式驗證成功！");
+        return res.json(analysisResult);
+      }
+
       let contents: any[] = [];
 
       if (storagePath) {
@@ -1046,10 +1436,17 @@ ${prompt ? `【使用者補充】${prompt}` : ""}
         isQuotaError: error.message.includes("high demand")
       });
     } finally {
-      if (tempFilePath && fs.existsSync(tempFilePath)) {
+      const filesToCleanup = Array.from(new Set([tempFilePath, ...cleanupPaths].filter((p): p is string => Boolean(p))));
+      for (const filePath of filesToCleanup) {
+        if (!fs.existsSync(filePath)) continue;
         try {
-          fs.unlinkSync(tempFilePath);
-          console.log("暫存檔案已刪除");
+          const stat = fs.statSync(filePath);
+          if (stat.isDirectory()) {
+            fs.rmSync(filePath, { recursive: true, force: true });
+          } else {
+            fs.unlinkSync(filePath);
+          }
+          console.log("暫存檔案已刪除:", filePath);
         } catch (e) {
           console.error("刪除暫存檔案失敗:", e);
         }

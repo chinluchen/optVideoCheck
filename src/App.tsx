@@ -260,6 +260,7 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [url, setUrl] = useState('');
   const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [analysisMode, setAnalysisMode] = useState<'standard'>('standard');
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<VerificationResult | null>(null);
@@ -664,8 +665,101 @@ export default function App() {
     setLoading(true);
     setError(null);
     setResult(null);
+    let stopStandardStageSequence: (() => void) | null = null;
 
     try {
+      const checklist = selectedSteps.map((title, i) => {
+        const step = standardSteps.find(s => s.title === title);
+        return {
+          step_id: step?.id || `${i + 1}`,
+          step_name: step?.title || title,
+          criteria: step?.correctAnswer || '無特定要求'
+        };
+      });
+
+      const prompt = `
+請依固定流程檢核表逐項判斷，不可自由推論或自由總評。
+若沒有明確證據與時間戳，該步驟狀態必須標示為「無法判斷」。
+      `.trim();
+
+      const useStandardMode = analysisMode === 'standard' && !!videoFile;
+      const stageMessages = ['上傳中', '影片壓縮中', '語音辨識中', '關鍵畫面擷取中', 'AI流程分析中'];
+      let stageTimer: ReturnType<typeof setInterval> | null = null;
+      const startStageSequence = () => {
+        let stageIndex = 0;
+        setTranscriptionStatus(stageMessages[stageIndex]);
+        stageTimer = setInterval(() => {
+          stageIndex = Math.min(stageIndex + 1, stageMessages.length - 1);
+          setTranscriptionStatus(stageMessages[stageIndex]);
+        }, 3500);
+      };
+      const stopStageSequence = () => {
+        if (stageTimer) clearInterval(stageTimer);
+        stageTimer = null;
+      };
+      stopStandardStageSequence = stopStageSequence;
+
+      if (useStandardMode) {
+        setUploadProgress(5);
+        startStageSequence();
+
+        const formData = new FormData();
+        formData.append('analysisMode', 'standard');
+        formData.append('prompt', prompt);
+        formData.append('checklist', JSON.stringify(checklist));
+        formData.append('studentName', user.displayName);
+        formData.append('studentUid', user.uid);
+        formData.append('videoUrl', '本地上傳影片');
+        formData.append('video', videoFile);
+
+        const data = await new Promise<any>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', '/api/verify');
+
+          xhr.upload.onprogress = (event) => {
+            if (!event.lengthComputable) return;
+            const percent = event.loaded / event.total;
+            setUploadProgress(Math.max(5, Math.min(65, Math.round(percent * 60) + 5)));
+          };
+
+          xhr.onload = () => {
+            stopStageSequence();
+            if (xhr.status >= 200 && xhr.status < 300) {
+              setUploadProgress(100);
+              try {
+                resolve(JSON.parse(xhr.responseText));
+              } catch (e) {
+                reject(new Error('伺服器回傳格式錯誤'));
+              }
+            } else {
+              let errorMessage = '後端分析失敗';
+              try {
+                const errorData = JSON.parse(xhr.responseText);
+                errorMessage = errorData.error || errorData.message || errorMessage;
+              } catch (e) {
+                errorMessage = `伺服器錯誤 (${xhr.status}): ${xhr.statusText}`;
+              }
+              reject(new Error(errorMessage));
+            }
+          };
+
+          xhr.onerror = () => {
+            stopStageSequence();
+            reject(new Error('網路連線錯誤'));
+          };
+
+          xhr.send(formData);
+        });
+
+        if (!data.transcript) {
+          data.transcript = '';
+        }
+
+        setResult(data);
+        setTranscriptionStatus(null);
+        return;
+      }
+
       let finalVideoUrl = url.trim();
       let videoData: any = null;
       let actualTranscript = '';
@@ -733,20 +827,6 @@ export default function App() {
         }
       }
 
-      const checklist = selectedSteps.map((title, i) => {
-        const step = standardSteps.find(s => s.title === title);
-        return {
-          step_id: step?.id || `${i + 1}`,
-          step_name: step?.title || title,
-          criteria: step?.correctAnswer || '無特定要求'
-        };
-      });
-
-      const prompt = `
-請依固定流程檢核表逐項判斷，不可自由推論或自由總評。
-若沒有明確證據與時間戳，該步驟狀態必須標示為「無法判斷」。
-      `.trim();
-
       // Call Backend API for analysis
       const data = await new Promise<any>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -802,6 +882,7 @@ export default function App() {
         xhr.send(JSON.stringify({
           prompt,
           checklist,
+          analysisMode,
           videoData,
           modelName: "gemini-3-flash-preview",
           studentName: user.displayName,
@@ -821,6 +902,7 @@ export default function App() {
       console.error(err);
       setError('分析失敗，請稍後再試。錯誤訊息：' + (err.message || '未知錯誤'));
     } finally {
+      stopStandardStageSequence?.();
       setLoading(false);
       setUploadProgress(null);
       setTranscriptionStatus(null);
@@ -1319,18 +1401,18 @@ export default function App() {
                       </div>
                       <div className="space-y-4">
                         <h3 className="text-2xl font-black text-zinc-900 tracking-tight">
-                          {uploadProgress !== null 
+                          {transcriptionStatus || (uploadProgress !== null 
                             ? (uploadProgress >= 95 ? "正在進行 AI 專業分析..." : "正在上傳影片...")
-                            : transcriptionStatus || '正在讀取影音並轉為文字...'}
+                            : '正在讀取影音並轉為文字...')}
                         </h3>
                         <p className="text-zinc-500 text-base leading-relaxed">
-                          {uploadProgress !== null 
+                          {transcriptionStatus
+                            ? '系統正在依目前模式進行處理，請稍候。'
+                            : uploadProgress !== null 
                             ? (uploadProgress >= 95 
                                 ? '影片已成功送達，AI 考官正在仔細審查每一個操作細節，請稍候。' 
                                 : '影片正在安全地傳送至雲端伺服器，完成後 AI 將立即開始分析。')
-                            : transcriptionStatus 
-                              ? '背景處理程序正在運作中，這可能需要一點時間，您可以稍候或查看進度。'
-                              : 'AI 正在利用多模態技術分析影片內容，提取對話與操作細節，並與標準步驟進行精確比對。'}
+                            : 'AI 正在利用多模態技術分析影片內容，提取對話與操作細節，並與標準步驟進行精確比對。'}
                         </p>
                       </div>
                       {uploadProgress !== null && (
@@ -1648,6 +1730,21 @@ export default function App() {
                           <h2 className="text-sm font-semibold uppercase tracking-wider">影片來源</h2>
                         </div>
                         <div className="bg-white p-8 rounded-[2.5rem] border border-zinc-200 shadow-sm space-y-6 transition-all hover:shadow-md">
+                          <div className="flex items-center justify-between gap-3 flex-wrap">
+                            <div className="space-y-1">
+                              <label className="text-xs font-black text-zinc-400 uppercase tracking-widest">分析模式</label>
+                              <p className="text-xs text-zinc-500">預設使用一般分析模式，適合上傳原始影片。</p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setAnalysisMode('standard')}
+                              className={`px-4 py-2.5 rounded-full text-sm font-black border transition-all shadow-sm ${analysisMode === 'standard' ? 'bg-indigo-600 text-white border-indigo-600 shadow-indigo-200' : 'bg-white text-zinc-600 border-zinc-200 hover:border-indigo-300 hover:text-indigo-600'}`}
+                              aria-pressed={analysisMode === 'standard'}
+                            >
+                              一般分析模式
+                            </button>
+                          </div>
+
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div className="space-y-3">
                               <label className="text-xs font-black text-zinc-400 uppercase tracking-widest">YouTube 連結</label>
