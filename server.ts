@@ -283,16 +283,20 @@ async function getVideoDurationSeconds(videoPath: string): Promise<number | null
   }
 }
 
-async function compressVideoForAnalysis(inputPath: string, outputPath: string) {
+async function compressVideoForAnalysis(
+  inputPath: string,
+  outputPath: string,
+  options: { includeAudio?: boolean } = {}
+) {
+  const includeAudio = options.includeAudio !== false;
   await new Promise<void>((resolve, reject) => {
-    ffmpeg(inputPath)
+    const command = ffmpeg(inputPath)
       .videoCodec("libx264")
-      .audioCodec("aac")
-      .audioChannels(1)
-      .audioBitrate("128k")
       .outputOptions([
         "-vf",
         "scale=-2:720:force_original_aspect_ratio=decrease,fps=15",
+        "-pix_fmt",
+        "yuv420p",
         "-preset",
         "veryfast",
         "-movflags",
@@ -304,9 +308,22 @@ async function compressVideoForAnalysis(inputPath: string, outputPath: string) {
         "-bufsize",
         "3000k",
       ])
+      .on("start", (commandLine) => {
+        console.log(`[ffmpeg compress ${includeAudio ? "av" : "video-only"}] ${commandLine}`);
+      })
+      .on("stderr", (line) => {
+        console.log(`[ffmpeg compress stderr] ${line}`);
+      })
       .on("end", () => resolve())
-      .on("error", reject)
-      .save(outputPath);
+      .on("error", reject);
+
+    if (includeAudio) {
+      command.audioCodec("aac").audioChannels(1).audioBitrate("128k");
+    } else {
+      command.noAudio();
+    }
+
+    command.save(outputPath);
   });
 }
 
@@ -1116,17 +1133,25 @@ async function startServer() {
         const audioPath = path.join(tmpdir(), `standard_audio_${randomUUID()}.wav`);
         const keyframeDir = path.join(tmpdir(), `standard_keyframes_${randomUUID()}`);
         cleanupPaths.push(compressedPath, audioPath, keyframeDir);
+        let compressedVideoReady = false;
 
         try {
-          await compressVideoForAnalysis(sttSourceVideoPath, compressedPath);
+          await extractAudioForStt(sttSourceVideoPath, audioPath);
         } catch (error: any) {
-          throw new Error(`ffmpeg壓縮失敗：${error?.message || error}`);
+          throw new Error(`音訊抽取失敗：${error?.message || error}`);
         }
 
         try {
-          await extractAudioForStt(compressedPath, audioPath);
+          await compressVideoForAnalysis(sttSourceVideoPath, compressedPath, { includeAudio: true });
+          compressedVideoReady = true;
         } catch (error: any) {
-          throw new Error(`音訊抽取失敗：${error?.message || error}`);
+          console.warn("含音訊壓縮失敗，改用無音訊壓縮重試:", error);
+          try {
+            await compressVideoForAnalysis(sttSourceVideoPath, compressedPath, { includeAudio: false });
+            compressedVideoReady = true;
+          } catch (fallbackError: any) {
+            console.warn("無音訊壓縮仍失敗，改用原始影片擷取關鍵畫面:", fallbackError);
+          }
         }
 
         try {
@@ -1141,7 +1166,8 @@ async function startServer() {
 
         let keyframes: Array<{ path: string; timestamp: string }> = [];
         try {
-          keyframes = await extractKeyframesForAnalysis(compressedPath, durationSeconds, keyframeDir);
+          const keyframeSourcePath = compressedVideoReady ? compressedPath : sttSourceVideoPath;
+          keyframes = await extractKeyframesForAnalysis(keyframeSourcePath, durationSeconds, keyframeDir);
         } catch (error: any) {
           throw new Error(`關鍵畫面擷取失敗：${error?.message || error}`);
         }
