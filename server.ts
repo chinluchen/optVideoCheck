@@ -10,6 +10,7 @@ import OpenAI from "openai";
 import ytdl from "ytdl-core";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import ffprobeInstaller from "@ffprobe-installer/ffprobe";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
 import admin from "firebase-admin";
@@ -19,6 +20,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import firebaseConfig from './firebase-applet-config.json';
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 // Initialize Firebase Admin
 admin.initializeApp({
