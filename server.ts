@@ -1022,6 +1022,63 @@ async function startServer() {
         );
       };
 
+      const isNonNullObject = (value: any): value is Record<string, unknown> => {
+        return value !== null && typeof value === "object";
+      };
+
+      const summarizeVerifyValue = (value: any) => ({
+        isNull: value === null,
+        isUndefined: value === undefined,
+        isObject: isNonNullObject(value),
+        objectKeysLength: isNonNullObject(value) ? Object.keys(value).length : 0,
+        isArray: Array.isArray(value),
+        arrayLength: Array.isArray(value) ? value.length : 0
+      });
+
+      const verifyDebugLog = (location: string, values: Record<string, any> | null | undefined) => {
+        const payload: Record<string, any> = {
+          location
+        };
+
+        if (!values || typeof values !== "object") {
+          payload.value = summarizeVerifyValue(values);
+          console.log(`[VERIFY_DEBUG] ${JSON.stringify(payload)}`);
+          return;
+        }
+
+        for (const [key, value] of Object.entries(values)) {
+          payload[key] = summarizeVerifyValue(value);
+        }
+
+        console.log(`[VERIFY_DEBUG] ${JSON.stringify(payload)}`);
+      };
+
+      const compactGeminiParts = (parts: any[]) => {
+        if (!Array.isArray(parts)) return [];
+        return parts.filter((part) => {
+          if (!part || typeof part !== "object") return false;
+          return Object.keys(part).length > 0;
+        });
+      };
+
+      const extractGeminiTextSafely = (result: any) => {
+        const candidateParts = Array.isArray(result?.candidates?.[0]?.content?.parts)
+          ? result.candidates[0].content.parts
+          : [];
+        const safeParts = candidateParts.filter((part): part is Record<string, any> => {
+          return !!part && typeof part === "object";
+        });
+
+        return {
+          text: safeParts
+            .map((part) => (typeof part.text === "string" ? part.text : ""))
+            .join(""),
+          candidatePartCount: candidateParts.length,
+          safePartCount: safeParts.length,
+          skippedPartCount: candidateParts.length - safeParts.length
+        };
+      };
+
       const buildFinalResult = (raw: any, duration: number | null, transcript: string = "") => {
         const sourceSteps = Array.isArray(raw?.step_checks) ? raw.step_checks : [];
         const sourceById = new Map<string, any>();
@@ -1244,7 +1301,7 @@ async function startServer() {
           sourceName: "一般分析模式"
         });
 
-        const standardParts: any[] = [
+        const standardParts: any[] = compactGeminiParts([
           { text: standardPrompt },
           ...keyframes.map((frame) => ({
             inlineData: {
@@ -1252,7 +1309,7 @@ async function startServer() {
               mimeType: "image/jpeg"
             }
           }))
-        ];
+        ]);
 
         const runStandardModelWithRetry = async () => {
           let lastError = "";
@@ -1261,11 +1318,23 @@ async function startServer() {
               ? ""
               : "你上一版輸出不符合 JSON schema。請只輸出合法 JSON，且每一項都含 step_id, step_name, status, confidence, evidence, timestamp, feedback。";
 
+            const promptParts = compactGeminiParts([
+              ...standardParts,
+              ...(retryInstruction ? [{ text: retryInstruction }] : [])
+            ]);
+
+            verifyDebugLog("standard.before_generateContent", {
+              promptParts,
+              responseSchema,
+              systemInstruction,
+              retryInstruction
+            });
+
             const result = await ai.models.generateContent({
               model: "gemini-3-flash-preview",
               contents: [{
                 role: "user",
-                parts: [...standardParts, ...(retryInstruction ? [{ text: retryInstruction }] : [])]
+                parts: promptParts
               }],
               config: {
                 systemInstruction,
@@ -1275,16 +1344,33 @@ async function startServer() {
               }
             });
 
-            if (!result.candidates || result.candidates.length === 0) {
+            verifyDebugLog("standard.after_generateContent", {
+              result,
+              candidates: result?.candidates,
+              candidateParts: result?.candidates?.[0]?.content?.parts
+            });
+
+            const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+            if (candidates.length === 0) {
               lastError = "Gemini 未能生成任何結果";
               continue;
             }
 
-            let text = (result.text || "{}").replace(/```json/g, "").replace(/```/g, "").trim();
+            const extracted = extractGeminiTextSafely(result);
+            verifyDebugLog("standard.before_json_parse", {
+              extractedText: extracted.text,
+              candidateParts: result?.candidates?.[0]?.content?.parts
+            });
+
+            let text = (extracted.text || "{}").replace(/```json/g, "").replace(/```/g, "").trim();
             if (!text) text = "{}";
 
             try {
               const raw = JSON.parse(text);
+              verifyDebugLog("standard.before_validateRawShape", {
+                raw,
+                rawStepChecks: raw?.step_checks
+              });
               if (!validateRawShape(raw)) {
                 lastError = "schema 驗證失敗";
                 continue;
@@ -1298,6 +1384,12 @@ async function startServer() {
         };
 
         const rawAnalysisResult = await runStandardModelWithRetry();
+        verifyDebugLog("standard.before_buildFinalResult", {
+          rawAnalysisResult,
+          rawStepChecks: rawAnalysisResult?.step_checks,
+          durationSeconds,
+          transcriptText
+        });
         const analysisResult = buildFinalResult(rawAnalysisResult, durationSeconds, transcriptText);
 
         await firestore.collection('submissions').add({
@@ -1466,9 +1558,21 @@ ${prompt ? `【使用者補充】${prompt}` : ""}
             ? ""
             : "你上一版輸出不符合 JSON schema。請只輸出合法 JSON，且每一項都含 step_id, step_name, status, confidence, evidence, timestamp, feedback。";
 
+          const promptParts = compactGeminiParts([
+            ...contents,
+            { text: `${finalPrompt}\n${retryInstruction}`.trim() }
+          ]);
+
+          verifyDebugLog("legacy.before_generateContent", {
+            promptParts,
+            responseSchema,
+            systemInstruction,
+            retryInstruction
+          });
+
           const result = await ai.models.generateContent({
             model: "gemini-3-flash-preview",
-            contents: [{ role: "user", parts: [...contents, { text: `${finalPrompt}\n${retryInstruction}`.trim() }] }],
+            contents: [{ role: "user", parts: promptParts }],
             config: {
               systemInstruction,
               responseMimeType: "application/json",
@@ -1477,16 +1581,33 @@ ${prompt ? `【使用者補充】${prompt}` : ""}
             }
           });
 
-          if (!result.candidates || result.candidates.length === 0) {
+          verifyDebugLog("legacy.after_generateContent", {
+            result,
+            candidates: result?.candidates,
+            candidateParts: result?.candidates?.[0]?.content?.parts
+          });
+
+          const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+          if (candidates.length === 0) {
             lastError = "Gemini 未能生成任何結果";
             continue;
           }
 
-          let text = (result.text || "{}").replace(/```json/g, "").replace(/```/g, "").trim();
+          const extracted = extractGeminiTextSafely(result);
+          verifyDebugLog("legacy.before_json_parse", {
+            extractedText: extracted.text,
+            candidateParts: result?.candidates?.[0]?.content?.parts
+          });
+
+          let text = (extracted.text || "{}").replace(/```json/g, "").replace(/```/g, "").trim();
           if (!text) text = "{}";
 
           try {
             const raw = JSON.parse(text);
+            verifyDebugLog("legacy.before_validateRawShape", {
+              raw,
+              rawStepChecks: raw?.step_checks
+            });
             if (!validateRawShape(raw)) {
               lastError = "schema 驗證失敗";
               continue;
@@ -1500,6 +1621,12 @@ ${prompt ? `【使用者補充】${prompt}` : ""}
       };
 
       const rawAnalysisResult = await runModelWithRetry();
+      verifyDebugLog("legacy.before_buildFinalResult", {
+        rawAnalysisResult,
+        rawStepChecks: rawAnalysisResult?.step_checks,
+        durationSeconds,
+        transcriptText
+      });
       console.log("Gemini 分析完成，正在解析結果...");
       const analysisResult = buildFinalResult(rawAnalysisResult, durationSeconds, transcriptText);
 
