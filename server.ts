@@ -38,10 +38,12 @@ const STORAGE_UPLOAD_ALLOWED_ORIGINS = [
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
+  console.error(err.stack);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  console.error(reason);
 });
 
 const __filename = fileURLToPath(import.meta.url);
@@ -237,6 +239,8 @@ async function processTranscription(id: string, videoUrl: string) {
 
     await new Promise<void>((resolve, reject) => {
       ffmpeg(tempVideoPath)
+        .noVideo()
+        .outputOptions(["-map", "0:a:0?", "-dn", "-sn"])
         .toFormat('mp3')
         .on('end', () => resolve())
         .on('error', reject)
@@ -263,6 +267,7 @@ async function transcribeLocalVideoWithWhisper(localVideoPath: string) {
     await new Promise<void>((resolve, reject) => {
       ffmpeg(localVideoPath)
         .noVideo()
+        .outputOptions(["-map", "0:a:0?", "-dn", "-sn"])
         .audioCodec("libmp3lame")
         .audioBitrate("64k")
         .toFormat("mp3")
@@ -283,7 +288,6 @@ async function transcribeLocalVideoWithWhisper(localVideoPath: string) {
   }
 }
 
-const STANDARD_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const STANDARD_MAX_DURATION_SECONDS = 30 * 60;
 const STANDARD_KEYFRAME_INTERVAL_SECONDS = 8;
 const STANDARD_MAX_KEYFRAMES = 10;
@@ -356,13 +360,14 @@ async function compressVideoForAnalysis(
 }
 
 async function extractAudioForStt(inputPath: string, outputPath: string) {
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg(inputPath)
-      .noVideo()
-      .audioChannels(1)
-      .audioFrequency(16000)
-      .audioCodec("pcm_s16le")
-      .format("wav")
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPath)
+        .noVideo()
+        .outputOptions(["-map", "0:a:0?", "-dn", "-sn"])
+        .audioChannels(1)
+        .audioFrequency(16000)
+        .audioCodec("pcm_s16le")
+        .format("wav")
       .on("end", () => resolve())
       .on("error", reject)
       .save(outputPath);
@@ -408,97 +413,6 @@ async function extractKeyframesForAnalysis(
   }
 
   return keyframes;
-}
-
-async function parseVerifyRequest(req: express.Request) {
-  const contentType = String(req.headers["content-type"] || "");
-  if (!contentType.includes("multipart/form-data")) {
-    return {
-      fields: (req.body || {}) as Record<string, any>,
-      uploadedVideoPath: null as string | null,
-      uploadedVideoMimeType: null as string | null,
-      uploadedVideoName: null as string | null,
-      cleanupPaths: [] as string[],
-    };
-  }
-
-  const busboyModule: any = await import("@fastify/busboy");
-  const Busboy = busboyModule.default || busboyModule;
-
-  return await new Promise<{
-    fields: Record<string, any>;
-    uploadedVideoPath: string | null;
-    uploadedVideoMimeType: string | null;
-    uploadedVideoName: string | null;
-    cleanupPaths: string[];
-  }>((resolve, reject) => {
-    const fields: Record<string, any> = {};
-    const cleanupPaths: string[] = [];
-    let uploadedVideoPath: string | null = null;
-    let uploadedVideoMimeType: string | null = null;
-    let uploadedVideoName: string | null = null;
-    let sawVideoFile = false;
-    let resolved = false;
-    let rejected = false;
-
-    const finishResolve = () => {
-      if (resolved || rejected) return;
-      resolved = true;
-      resolve({ fields, uploadedVideoPath, uploadedVideoMimeType, uploadedVideoName, cleanupPaths });
-    };
-
-    const fail = (error: any) => {
-      if (resolved || rejected) return;
-      rejected = true;
-      reject(error);
-    };
-
-    const busboy = new Busboy({
-      headers: req.headers,
-      limits: {
-        fileSize: STANDARD_MAX_UPLOAD_BYTES,
-        files: 1
-      }
-    });
-
-    busboy.on("field", (name: string, value: string) => {
-      fields[name] = value;
-    });
-
-    busboy.on("file", (name: string, file: NodeJS.ReadableStream, info: any) => {
-      if (name !== "video") {
-        file.resume();
-        return;
-      }
-
-      const fileStream: any = file;
-      sawVideoFile = true;
-      uploadedVideoMimeType = info?.mimeType || "video/mp4";
-      uploadedVideoName = info?.filename || "upload.mp4";
-      const extension = path.extname(uploadedVideoName) || `.${(uploadedVideoMimeType.split("/")[1] || "mp4")}`;
-      uploadedVideoPath = path.join(tmpdir(), `standard_upload_${randomUUID()}${extension}`);
-      cleanupPaths.push(uploadedVideoPath);
-
-      const writeStream = fs.createWriteStream(uploadedVideoPath);
-
-      file.on("limit", () => {
-        fail(new Error("檔案太大，請上傳小於 100MB 的影片"));
-        fileStream.destroy?.();
-        writeStream.destroy();
-      });
-
-      file.on("error", fail);
-      writeStream.on("error", fail);
-      writeStream.on("finish", () => finishResolve());
-      file.pipe(writeStream);
-    });
-
-    busboy.on("error", fail);
-    busboy.on("finish", () => {
-      if (!sawVideoFile) finishResolve();
-    });
-    req.pipe(busboy);
-  });
 }
 
 function buildStandardAnalysisPrompt(options: {
@@ -552,8 +466,8 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT || 3000;
 
-  app.use(express.json({ limit: '200mb' }));
-  app.use(express.urlencoded({ limit: '200mb', extended: true }));
+  app.use(express.json({ limit: '5mb' }));
+  app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (err) {
@@ -745,27 +659,27 @@ async function startServer() {
   });
 
   app.post("/api/verify", async (req, res) => {
+    console.log("=== VERIFY START ===");
     console.log("收到驗證請求...");
     let tempFilePath: string | null = null;
     let sttSourceVideoPath: string | null = null;
     let transcriptText = "";
     const cleanupPaths: string[] = [];
     try {
-      const requestPayload = await parseVerifyRequest(req);
-      const body = requestPayload.fields || {};
+      if (String(req.headers["content-type"] || "").includes("multipart/form-data")) {
+        return res.status(415).json({
+          error: "請改用 Storage 上傳流程：先呼叫 /api/storage-upload-url 取得簽名網址並 PUT 上傳，再用 storagePath 呼叫 /api/verify。"
+        });
+      }
+      console.log("STEP 1 parseRequestBody");
+      const body = req.body || {};
       const prompt = body.prompt;
       const checklist = body.checklist;
-      const videoData = body.videoData;
       const studentName = body.studentName;
       const videoUrl = body.videoUrl;
       const storagePath = body.storagePath;
       const videoMimeType = body.videoMimeType;
       const analysisMode = String(body.analysisMode || "legacy");
-      if (requestPayload.uploadedVideoPath) {
-        sttSourceVideoPath = requestPayload.uploadedVideoPath;
-        tempFilePath = requestPayload.uploadedVideoPath;
-        cleanupPaths.push(...requestPayload.cleanupPaths);
-      }
       const apiKey = process.env.GEMINI_API_KEY;
 
       if (!apiKey) {
@@ -774,6 +688,36 @@ async function startServer() {
       }
 
       const ai = new GoogleGenAI({ apiKey });
+      const PRIMARY_MODEL = "gemini-2.5-flash";
+      const FALLBACK_MODEL = "gemini-2.5-flash-lite";
+      const isTransientGeminiError = (err: any): boolean => {
+        const msg = String(err?.message || err || "");
+        const status = err?.status ?? err?.code;
+        const causeCode = err?.cause?.code || "";
+        const networkCodes = ["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET"];
+        return status === 503 || status === 429 ||
+          /503|429|UNAVAILABLE|overloaded|high demand|RESOURCE_EXHAUSTED|fetch failed/i.test(msg) ||
+          networkCodes.includes(causeCode);
+      };
+      const callGeminiWithBackoff = async (params: any, maxRetries = 4) => {
+        let attempt = 0;
+        let useFallback = false;
+        while (true) {
+          const currentModel = useFallback ? FALLBACK_MODEL : params.model;
+          try {
+            return await ai.models.generateContent({ ...params, model: currentModel });
+          } catch (err: any) {
+            attempt++;
+            if (!isTransientGeminiError(err) || attempt > maxRetries) throw err;
+            if (attempt >= Math.ceil(maxRetries / 2)) useFallback = true;
+            const base = Math.min(1000 * 2 ** (attempt - 1), 16000);
+            const delay = base + Math.floor(Math.random() * 500);
+            console.warn(`Gemini 重試 (attempt ${attempt}/${maxRetries}) model=${currentModel} status=${err?.status ?? err?.code} cause=${err?.cause?.code || "-"}: ${String(err?.message || err)}`);
+            await new Promise((r) => setTimeout(r, delay));
+          }
+        }
+      };
+
       const allowedStatuses = ["明確完成", "可能完成", "無法判斷", "明確未完成"] as const;
       type StepStatus = typeof allowedStatuses[number];
       type ChecklistStep = { step_id: string; step_name: string; criteria: string };
@@ -810,6 +754,7 @@ async function startServer() {
           .filter(Boolean) as ChecklistStep[];
       };
 
+      console.log("STEP 2 loadChecklist");
       const checklistSource = Array.isArray(checklist)
         ? checklist
         : typeof checklist === "string"
@@ -886,6 +831,7 @@ async function startServer() {
         required: ["step_checks"]
       };
 
+      console.log("STEP 3 prepareVideo");
       const toSeconds = (timeLike: string): number | null => {
         if (!timeLike || typeof timeLike !== "string") return null;
         const parts = timeLike.trim().split(":");
@@ -1185,6 +1131,7 @@ async function startServer() {
       };
 
       const uploadFileToGeminiAndBuildPart = async (localFilePath: string, mimeType: string) => {
+        console.log("STEP 5 Gemini");
         console.log("正在上傳至 Gemini File API...");
         if (!localFilePath || !fs.existsSync(localFilePath)) {
           throw new Error(`Gemini 檔案上傳失敗: 找不到本機檔案 ${localFilePath || "(undefined)"}`);
@@ -1211,11 +1158,11 @@ async function startServer() {
         }
 
         console.log("正在等待影片處理:", fileObj.name);
-        let file = await (ai as any).files.get(fileObj.name);
+        let file = await (ai as any).files.get({ name: fileObj.name });
         let pollCount = 0;
         while (file.state === 'PROCESSING' && pollCount < 60) {
           await new Promise(resolve => setTimeout(resolve, 2000));
-          file = await (ai as any).files.get(fileObj.name);
+          file = await (ai as any).files.get({ name: fileObj.name });
           pollCount++;
         }
 
@@ -1226,14 +1173,86 @@ async function startServer() {
       };
 
       let durationSeconds: number | null = null;
-      if (videoUrl && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'))) {
+      let videoMime = typeof videoMimeType === "string" && videoMimeType.trim() ? videoMimeType.trim() : "video/mp4";
+      const isYouTubeUrl = typeof videoUrl === "string" && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'));
+
+      if (storagePath) {
+        const extension = path.extname(storagePath) || '.mp4';
+        tempFilePath = path.join(tmpdir(), `storage_upload_${randomUUID()}${extension}`);
+        sttSourceVideoPath = tempFilePath;
+        cleanupPaths.push(tempFilePath);
+        const bucketFile = storageBucket.file(storagePath);
+
+        console.log(`從 Cloud Storage 下載影片: ${storagePath}`);
+        await bucketFile.download({ destination: tempFilePath });
+        const [metadata] = await bucketFile.getMetadata();
+        videoMime = videoMimeType || metadata.contentType || "video/mp4";
+
         try {
-          const info = await ytdl.getBasicInfo(videoUrl);
-          durationSeconds = parseInt(info.videoDetails.lengthSeconds);
-          console.log(`偵測到 YouTube 影片長度: ${durationSeconds} 秒`);
+          const probeResult: any = await new Promise((resolve, reject) => {
+            ffmpeg.ffprobe(tempFilePath!, (err, data) => {
+              if (err) reject(err);
+              else resolve(data);
+            });
+          });
+          durationSeconds = Math.round(probeResult.format.duration);
+          console.log(`偵測到雲端影片長度: ${durationSeconds} 秒`);
         } catch (e) {
-          console.warn("YouTube 影片長度偵測失敗:", e);
+          console.warn("雲端影片長度偵測失敗:", e);
         }
+      } else if (isYouTubeUrl) {
+        try {
+          console.log("YouTube 驗證：嘗試先下載影片再送 AI 分析...");
+          tempFilePath = await downloadYoutubeToTempFile(videoUrl);
+          sttSourceVideoPath = tempFilePath;
+          cleanupPaths.push(tempFilePath);
+          videoMime = "video/mp4";
+          try {
+            const metadata: any = await new Promise((resolve, reject) => {
+              ffmpeg.ffprobe(tempFilePath!, (err, data) => {
+                if (err) reject(err);
+                else resolve(data);
+              });
+            });
+            durationSeconds = Math.round(metadata.format.duration);
+            console.log(`偵測到 YouTube 下載影片長度: ${durationSeconds} 秒`);
+          } catch (e) {
+            console.warn("YouTube 下載影片長度偵測失敗:", e);
+          }
+        } catch (ytError: any) {
+          console.warn("YouTube 下載失敗，改為保守輸出無法判斷:", ytError?.message || ytError);
+          const fallbackResult = buildUnableToJudgeResult(
+            "無法取得 YouTube 影片畫面（可能為權限或平台限制），系統不得推論步驟完成。",
+            durationSeconds,
+            transcriptText
+          );
+          console.log("STEP 6 Firestore");
+          await firestore.collection('submissions').add({
+            studentName: studentName || "匿名學生",
+            videoUrl: videoUrl || "YouTube 連結",
+            score: fallbackResult.score || 0,
+            result: fallbackResult,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          console.log("STEP 7 response");
+          return res.json(fallbackResult);
+        }
+      } else {
+        const fallbackResult = buildUnableToJudgeResult(
+          "未取得可驗證影片內容，系統依規則只能標示為無法判斷。",
+          durationSeconds,
+          transcriptText
+        );
+        console.log("STEP 6 Firestore");
+        await firestore.collection('submissions').add({
+          studentName: studentName || "匿名學生",
+          videoUrl: storagePath || videoUrl || "未提供影片",
+          score: fallbackResult.score || 0,
+          result: fallbackResult,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        console.log("STEP 7 response");
+        return res.json(fallbackResult);
       }
 
       if (analysisMode === "standard" && sttSourceVideoPath) {
@@ -1253,6 +1272,7 @@ async function startServer() {
         let compressedVideoReady = false;
 
         try {
+          console.log("STEP 4 STT");
           await extractAudioForStt(sttSourceVideoPath, audioPath);
         } catch (error: any) {
           throw new Error(`音訊抽取失敗：${error?.message || error}`);
@@ -1330,8 +1350,9 @@ async function startServer() {
               retryInstruction
             });
 
-            const result = await ai.models.generateContent({
-              model: "gemini-3-flash-preview",
+            console.log("STEP 5 Gemini");
+            const result = await callGeminiWithBackoff({
+              model: PRIMARY_MODEL,
               contents: [{
                 role: "user",
                 parts: promptParts
@@ -1392,6 +1413,7 @@ async function startServer() {
         });
         const analysisResult = buildFinalResult(rawAnalysisResult, durationSeconds, transcriptText);
 
+        console.log("STEP 6 Firestore");
         await firestore.collection('submissions').add({
           studentName: studentName || "匿名學生",
           videoUrl: storagePath || videoUrl || "本地上傳",
@@ -1404,131 +1426,14 @@ async function startServer() {
         });
 
         console.log("一般分析模式驗證成功！");
+        console.log("STEP 7 response");
         return res.json(analysisResult);
-      }
-
-      let contents: any[] = [];
-
-      if (storagePath) {
-        const extension = path.extname(storagePath) || '.mp4';
-        tempFilePath = path.join(tmpdir(), `storage_upload_${randomUUID()}${extension}`);
-        sttSourceVideoPath = tempFilePath;
-        const bucketFile = storageBucket.file(storagePath);
-
-        console.log(`從 Cloud Storage 下載影片: ${storagePath}`);
-        await bucketFile.download({ destination: tempFilePath });
-        const [metadata] = await bucketFile.getMetadata();
-        const effectiveMimeType = videoMimeType || metadata.contentType || "video/mp4";
-
-        try {
-          const probeResult: any = await new Promise((resolve, reject) => {
-            ffmpeg.ffprobe(tempFilePath!, (err, data) => {
-              if (err) reject(err);
-              else resolve(data);
-            });
-          });
-          durationSeconds = Math.round(probeResult.format.duration);
-          console.log(`偵測到雲端影片長度: ${durationSeconds} 秒`);
-        } catch (e) {
-          console.warn("雲端影片長度偵測失敗:", e);
-        }
-
-        contents = [await uploadFileToGeminiAndBuildPart(tempFilePath, effectiveMimeType)];
-      } else if (videoData && videoData.inlineData) {
-        const base64Data = videoData.inlineData.data;
-        const mimeType = videoData.inlineData.mimeType;
-        
-        if (base64Data.length > 10 * 1024 * 1024) {
-          console.log(`影片較大 (${(base64Data.length / 1024 / 1024).toFixed(2)} MB)，使用 File API 上傳...`);
-          const buffer = Buffer.from(base64Data, 'base64');
-          const extension = mimeType.split('/')[1] || 'mp4';
-          tempFilePath = path.join(tmpdir(), `gemini_upload_${randomUUID()}.${extension}`);
-          sttSourceVideoPath = tempFilePath;
-          fs.writeFileSync(tempFilePath, buffer);
-          
-          const stats = fs.statSync(tempFilePath);
-          console.log(`暫存檔案已建立: ${tempFilePath}, 大小: ${stats.size} bytes`);
-
-          try {
-            const metadata: any = await new Promise((resolve, reject) => {
-              ffmpeg.ffprobe(tempFilePath!, (err, data) => {
-                if (err) reject(err);
-                else resolve(data);
-              });
-            });
-            durationSeconds = Math.round(metadata.format.duration);
-            console.log(`偵測到本地影片長度: ${durationSeconds} 秒`);
-          } catch (e) {
-            console.warn("本地影片長度偵測失敗:", e);
-          }
-
-          contents = [await uploadFileToGeminiAndBuildPart(tempFilePath, mimeType)];
-        } else {
-          console.log("影片較小，使用 inlineData 分析...");
-          const extension = mimeType.split('/')[1] || 'mp4';
-          tempFilePath = path.join(tmpdir(), `inline_upload_${randomUUID()}.${extension}`);
-          sttSourceVideoPath = tempFilePath;
-          fs.writeFileSync(tempFilePath, Buffer.from(base64Data, 'base64'));
-          contents = [videoData];
-        }
-      } else if (videoUrl && (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be'))) {
-        try {
-          console.log("YouTube 驗證：嘗試先下載影片再送 AI 分析...");
-          tempFilePath = await downloadYoutubeToTempFile(videoUrl);
-          sttSourceVideoPath = tempFilePath;
-          try {
-            const metadata: any = await new Promise((resolve, reject) => {
-              ffmpeg.ffprobe(tempFilePath!, (err, data) => {
-                if (err) reject(err);
-                else resolve(data);
-              });
-            });
-            durationSeconds = Math.round(metadata.format.duration);
-            console.log(`偵測到 YouTube 下載影片長度: ${durationSeconds} 秒`);
-          } catch (e) {
-            console.warn("YouTube 下載影片長度偵測失敗:", e);
-          }
-
-          contents = [await uploadFileToGeminiAndBuildPart(tempFilePath, "video/mp4")];
-        } catch (ytError: any) {
-          console.warn("YouTube 下載失敗，改為保守輸出無法判斷:", ytError?.message || ytError);
-          const fallbackResult = buildUnableToJudgeResult(
-            "無法取得 YouTube 影片畫面（可能為權限或平台限制），系統不得推論步驟完成。",
-            durationSeconds,
-            transcriptText
-          );
-          await firestore.collection('submissions').add({
-            studentName: studentName || "匿名學生",
-            videoUrl: videoUrl || "YouTube 連結",
-            score: fallbackResult.score || 0,
-            result: fallbackResult,
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-          });
-          return res.json(fallbackResult);
-        }
-      } else {
-        contents = [];
-      }
-
-      if (contents.length === 0) {
-        const fallbackResult = buildUnableToJudgeResult(
-          "未取得可驗證影片內容，系統依規則只能標示為無法判斷。",
-          durationSeconds,
-          transcriptText
-        );
-        await firestore.collection('submissions').add({
-          studentName: studentName || "匿名學生",
-          videoUrl: storagePath || videoUrl || "未提供影片",
-          score: fallbackResult.score || 0,
-          result: fallbackResult,
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        return res.json(fallbackResult);
       }
 
       if (sttSourceVideoPath) {
         try {
           console.log(`開始 STT 逐字稿辨識: ${sttSourceVideoPath}`);
+          console.log("STEP 4 STT");
           transcriptText = await transcribeLocalVideoWithWhisper(sttSourceVideoPath);
           console.log(`STT 完成，逐字稿長度: ${transcriptText.length}`);
         } catch (sttError: any) {
@@ -1536,6 +1441,13 @@ async function startServer() {
           transcriptText = "";
         }
       }
+
+      const sourceFilePath = tempFilePath || sttSourceVideoPath;
+      if (!sourceFilePath) {
+        throw new Error("未取得可驗證影片來源");
+      }
+
+      const contents = [await uploadFileToGeminiAndBuildPart(sourceFilePath, videoMime)];
 
       const finalPrompt = `
 【固定流程檢核表】：
@@ -1570,8 +1482,9 @@ ${prompt ? `【使用者補充】${prompt}` : ""}
             retryInstruction
           });
 
-          const result = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
+          console.log("STEP 5 Gemini");
+          const result = await callGeminiWithBackoff({
+            model: PRIMARY_MODEL,
             contents: [{ role: "user", parts: promptParts }],
             config: {
               systemInstruction,
@@ -1631,6 +1544,7 @@ ${prompt ? `【使用者補充】${prompt}` : ""}
       const analysisResult = buildFinalResult(rawAnalysisResult, durationSeconds, transcriptText);
 
       console.log("正在儲存至 Firestore...");
+      console.log("STEP 6 Firestore");
       await firestore.collection('submissions').add({
         studentName: studentName || "匿名學生",
         videoUrl: storagePath || videoUrl || "本地上傳",
@@ -1640,15 +1554,21 @@ ${prompt ? `【使用者補充】${prompt}` : ""}
       });
 
       console.log("驗證成功！");
+      console.log("STEP 7 response");
       res.json(analysisResult);
 
     } catch (error: any) {
-      console.error("Gemini Error:", error.message);
-      const status = error.message.includes("503") ? 503 : 500;
-      const displayMessage = status === 503 ? "伺服器忙線中，稍後再試" : (error.message || "分析過程中發生未知錯誤");
+      console.error("=== VERIFY FAILED ===");
+      console.error(error);
+      console.error(error?.message);
+      console.error(error?.stack);
+      console.error("verify error cause:", error?.cause);
+      const errorMessage = String(error?.message || error || "");
+      const status = errorMessage.includes("503") ? 503 : 500;
+      const displayMessage = status === 503 ? "伺服器忙線中，稍後再試" : (errorMessage || "分析過程中發生未知錯誤");
       res.status(status).json({ 
         error: displayMessage,
-        isQuotaError: error.message.includes("high demand")
+        isQuotaError: errorMessage.includes("high demand")
       });
     } finally {
       const filesToCleanup = Array.from(new Set([tempFilePath, ...cleanupPaths].filter((p): p is string => Boolean(p))));
