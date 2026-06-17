@@ -144,6 +144,59 @@ const buildTranscriptRows = (transcriptText: string) => {
   return rows.map(({ time, text }) => ({ time, text }));
 };
 
+const requestStorageUploadUrl = async (file: File, studentUid: string) => {
+  const res = await fetch('/api/storage-upload-url', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      filename: file.name,
+      contentType: file.type || 'video/mp4',
+      studentUid
+    })
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || data.message || `無法建立影片上傳通道 (${res.status})`);
+  }
+
+  return data as { uploadUrl: string; storagePath: string };
+};
+
+const uploadVideoToSignedUrl = (
+  uploadUrl: string,
+  file: File,
+  onProgress: (percent: number) => void
+) => {
+  return new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', uploadUrl, true);
+    xhr.setRequestHeader('Content-Type', file.type || 'video/mp4');
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = event.loaded / event.total;
+      onProgress(Math.max(0, Math.min(100, Math.round(percent * 100))));
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`影片上傳失敗 (${xhr.status})`));
+      }
+    };
+
+    xhr.onerror = () => {
+      reject(new Error('影片上傳失敗：網路連線錯誤'));
+    };
+
+    xhr.send(file);
+  });
+};
+
 const SortableStepItem: React.FC<SortableStepItemProps> = ({ 
   step, 
   index, 
@@ -700,29 +753,51 @@ export default function App() {
       stopStandardStageSequence = stopStageSequence;
 
       if (useStandardMode) {
+        if (!videoFile) {
+          throw new Error('請先選擇影片檔案');
+        }
+
         setUploadProgress(5);
         startStageSequence();
 
-        const formData = new FormData();
-        formData.append('analysisMode', 'standard');
-        formData.append('prompt', prompt);
-        formData.append('checklist', JSON.stringify(checklist));
-        formData.append('studentName', user.displayName);
-        formData.append('studentUid', user.uid);
-        formData.append('videoUrl', '本地上傳影片');
-        formData.append('video', videoFile);
+        const { uploadUrl, storagePath } = await requestStorageUploadUrl(videoFile, user.uid);
+        setTranscriptionStatus('上傳中');
+        await uploadVideoToSignedUrl(uploadUrl, videoFile, (percent) => {
+          setUploadProgress(Math.max(5, Math.min(55, Math.round(percent * 0.5) + 5)));
+        });
+
+        setTranscriptionStatus('影片上傳完成，開始壓縮與分析...');
+        setUploadProgress(60);
+
+        let analysisInterval: ReturnType<typeof setInterval> | null = null;
+        const stopAnalysisProgress = () => {
+          if (analysisInterval) clearInterval(analysisInterval);
+          analysisInterval = null;
+        };
 
         const data = await new Promise<any>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           xhr.open('POST', '/api/verify');
+          xhr.setRequestHeader('Content-Type', 'application/json');
 
-          xhr.upload.onprogress = (event) => {
-            if (!event.lengthComputable) return;
-            const percent = event.loaded / event.total;
-            setUploadProgress(Math.max(5, Math.min(65, Math.round(percent * 60) + 5)));
+          const startAnalysisSim = () => {
+            if (analysisInterval) return;
+            analysisInterval = setInterval(() => {
+              setUploadProgress(prev => {
+                if (prev === null) return null;
+                if (prev >= 99) {
+                  stopAnalysisProgress();
+                  return 99;
+                }
+                return Math.min(99, prev + 0.5);
+              });
+            }, 500);
           };
 
+          startAnalysisSim();
+
           xhr.onload = () => {
+            stopAnalysisProgress();
             stopStageSequence();
             if (xhr.status >= 200 && xhr.status < 300) {
               setUploadProgress(100);
@@ -744,11 +819,20 @@ export default function App() {
           };
 
           xhr.onerror = () => {
+            stopAnalysisProgress();
             stopStageSequence();
             reject(new Error('網路連線錯誤'));
           };
 
-          xhr.send(formData);
+          xhr.send(JSON.stringify({
+            analysisMode: 'standard',
+            prompt,
+            checklist,
+            studentName: user.displayName,
+            studentUid: user.uid,
+            videoUrl: videoFile.name,
+            storagePath,
+          }));
         });
 
         if (!data.transcript) {

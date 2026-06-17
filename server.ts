@@ -29,6 +29,12 @@ admin.initializeApp({
 
 const firestore = getFirestore(firebaseConfig.firestoreDatabaseId);
 const storageBucket = admin.storage().bucket(firebaseConfig.storageBucket);
+const STORAGE_UPLOAD_ALLOWED_ORIGINS = [
+  "https://videocheck.chinluchen.dev",
+  "https://optvideocheck-599633745568.asia-east1.run.app",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173"
+];
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
@@ -129,6 +135,28 @@ const seedFirestore = async () => {
     });
   }
 };
+
+async function configureStorageCors() {
+  try {
+    await storageBucket.setCorsConfiguration([
+      {
+        origin: STORAGE_UPLOAD_ALLOWED_ORIGINS,
+        method: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+        responseHeader: [
+          "Content-Type",
+          "x-goog-resumable",
+          "x-goog-upload-command",
+          "x-goog-upload-offset",
+          "x-goog-upload-status"
+        ],
+        maxAgeSeconds: 3600
+      }
+    ]);
+    console.log("Cloud Storage CORS configuration applied.");
+  } catch (error) {
+    console.warn("無法自動設定 Cloud Storage CORS，將繼續啟動:", error);
+  }
+}
 
 const transcriptionQueue = new PQueue({ concurrency: 2 });
 let openaiClient: OpenAI | null = null;
@@ -515,6 +543,7 @@ async function startServer() {
   try {
     await migrateData();
     await seedFirestore();
+    await configureStorageCors();
   } catch (err) {
     console.error("Firestore Initialization Error (Migration/Seeding):", err);
     console.log("Server will continue to start, but Firestore operations may fail.");
@@ -688,6 +717,31 @@ async function startServer() {
     const doc = await firestore.collection('transcriptions').doc(id).get();
     if (!doc.exists) return res.status(404).json({ error: "Transcription not found" });
     res.json({ id: doc.id, ...doc.data() });
+  });
+
+  app.post("/api/storage-upload-url", async (req, res) => {
+    try {
+      const { filename, contentType, studentUid } = req.body || {};
+      const safeFilename = typeof filename === "string" && filename.trim() ? filename.trim() : "upload.mp4";
+      const safeContentType = typeof contentType === "string" && contentType.trim() ? contentType.trim() : "video/mp4";
+      const safeStudentUid = typeof studentUid === "string" && studentUid.trim() ? studentUid.trim() : "guest";
+      const filenameExt = path.extname(safeFilename);
+      const mimeExt = safeContentType.includes("/") ? `.${safeContentType.split("/")[1].split(";")[0].replace(/[^a-z0-9]/gi, "") || "mp4"}` : ".mp4";
+      const extension = filenameExt || mimeExt || ".mp4";
+      const storagePath = `original_videos/${safeStudentUid}/${Date.now()}_${randomUUID()}${extension}`;
+      const bucketFile = storageBucket.file(storagePath);
+      const [uploadUrl] = await bucketFile.getSignedUrl({
+        version: "v4",
+        action: "write",
+        expires: Date.now() + 15 * 60 * 1000,
+        contentType: safeContentType
+      });
+
+      res.json({ uploadUrl, storagePath });
+    } catch (error: any) {
+      console.error("建立影片上傳網址失敗:", error);
+      res.status(500).json({ error: `無法建立影片上傳通道：${error?.message || error}` });
+    }
   });
 
   app.post("/api/verify", async (req, res) => {
