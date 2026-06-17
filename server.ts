@@ -1129,11 +1129,17 @@ async function startServer() {
 
       const uploadFileToGeminiAndBuildPart = async (localFilePath: string, mimeType: string) => {
         console.log("正在上傳至 Gemini File API...");
+        if (!localFilePath || !fs.existsSync(localFilePath)) {
+          throw new Error(`Gemini 檔案上傳失敗: 找不到本機檔案 ${localFilePath || "(undefined)"}`);
+        }
         let uploadResult;
         try {
-          uploadResult = await (ai as any).files.upload(localFilePath, {
-            mimeType,
-            displayName: "Student Upload",
+          uploadResult = await (ai as any).files.upload({
+            file: localFilePath,
+            config: {
+              mimeType,
+              displayName: "Student Upload",
+            }
           });
           console.log("Gemini File API 上傳成功:", JSON.stringify(uploadResult));
         } catch (uploadError: any) {
