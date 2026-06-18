@@ -241,6 +241,10 @@ async function processTranscription(id: string, videoUrl: string) {
       ffmpeg(tempVideoPath)
         .noVideo()
         .outputOptions(["-map", "0:a:0?", "-dn", "-sn"])
+        .audioCodec("libmp3lame")
+        .audioChannels(1)
+        .audioBitrate("48k")
+        .audioFrequency(16000)
         .toFormat('mp3')
         .on('end', () => resolve())
         .on('error', reject)
@@ -269,7 +273,9 @@ async function transcribeLocalVideoWithWhisper(localVideoPath: string) {
         .noVideo()
         .outputOptions(["-map", "0:a:0?", "-dn", "-sn"])
         .audioCodec("libmp3lame")
-        .audioBitrate("64k")
+        .audioChannels(1)
+        .audioBitrate("48k")
+        .audioFrequency(16000)
         .toFormat("mp3")
         .on("end", () => resolve())
         .on("error", reject)
@@ -360,14 +366,15 @@ async function compressVideoForAnalysis(
 }
 
 async function extractAudioForStt(inputPath: string, outputPath: string) {
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(inputPath)
-        .noVideo()
-        .outputOptions(["-map", "0:a:0?", "-dn", "-sn"])
-        .audioChannels(1)
-        .audioFrequency(16000)
-        .audioCodec("pcm_s16le")
-        .format("wav")
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .noVideo()
+      .outputOptions(["-map", "0:a:0?", "-dn", "-sn"])
+      .audioCodec("libmp3lame")
+      .audioChannels(1)
+      .audioBitrate("48k")
+      .audioFrequency(16000)
+      .format("mp3")
       .on("end", () => resolve())
       .on("error", reject)
       .save(outputPath);
@@ -1266,7 +1273,7 @@ async function startServer() {
         }
 
         const compressedPath = path.join(tmpdir(), `standard_compressed_${randomUUID()}.mp4`);
-        const audioPath = path.join(tmpdir(), `standard_audio_${randomUUID()}.wav`);
+        const audioPath = path.join(tmpdir(), `standard_audio_${randomUUID()}.mp3`);
         const keyframeDir = path.join(tmpdir(), `standard_keyframes_${randomUUID()}`);
         cleanupPaths.push(compressedPath, audioPath, keyframeDir);
         let compressedVideoReady = false;

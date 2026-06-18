@@ -1,0 +1,3 @@
+runConfig:
+  memoryMiB: 4096
+  cpu: 2

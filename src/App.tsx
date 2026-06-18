@@ -438,8 +438,9 @@ export default function App() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (file.size > 100 * 1024 * 1024) { // 100MB limit
-        setError('檔案太大，請上傳小於 100MB 的影片');
+      const maxUploadBytes = 1024 * 1024 * 1024; // 1GB
+      if (file.size > maxUploadBytes) {
+        setError('檔案太大，請上傳小於 1GB 的影片');
         return;
       }
       setVideoFile(file);
@@ -824,16 +825,17 @@ export default function App() {
             reject(new Error('網路連線錯誤'));
           };
 
-          xhr.send(JSON.stringify({
-            analysisMode: 'standard',
-            prompt,
-            checklist,
-            studentName: user.displayName,
-            studentUid: user.uid,
-            videoUrl: videoFile.name,
-            storagePath,
-          }));
-        });
+        xhr.send(JSON.stringify({
+          analysisMode: 'standard',
+          prompt,
+          checklist,
+          studentName: user.displayName,
+          studentUid: user.uid,
+          videoUrl: videoFile.name,
+          storagePath,
+          videoMimeType: videoFile.type || 'video/mp4',
+        }));
+      });
 
         if (!data.transcript) {
           data.transcript = '';
@@ -845,28 +847,22 @@ export default function App() {
       }
 
       let finalVideoUrl = url.trim();
-      let videoData: any = null;
+      let storagePath: string | null = null;
+      let videoMimeType: string | null = null;
       let actualTranscript = '';
 
       if (videoFile) {
-        setTranscriptionStatus('正在讀取上傳影片...');
+        setTranscriptionStatus('上傳中...');
         setUploadProgress(5);
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve((reader.result as string).split(',')[1]);
-          reader.onerror = reject;
-          reader.readAsDataURL(videoFile);
+        const { uploadUrl, storagePath: uploadedStoragePath } = await requestStorageUploadUrl(videoFile, user.uid);
+        await uploadVideoToSignedUrl(uploadUrl, videoFile, (percent) => {
+          setUploadProgress(Math.max(5, Math.min(55, Math.round(percent * 0.5) + 5)));
         });
-
+        storagePath = uploadedStoragePath;
+        videoMimeType = videoFile.type || 'video/mp4';
         finalVideoUrl = "本地上傳影片";
-        videoData = {
-          inlineData: {
-            data: base64,
-            mimeType: videoFile.type || 'video/mp4'
-          }
-        };
-        setUploadProgress(10);
-        setTranscriptionStatus('影片已讀取，準備 AI 分析...');
+        setUploadProgress(60);
+        setTranscriptionStatus('影片上傳完成，準備 AI 分析...');
       } else {
         setTranscriptionStatus('正在準備分析 YouTube 影片...');
       }
@@ -967,11 +963,12 @@ export default function App() {
           prompt,
           checklist,
           analysisMode,
-          videoData,
           modelName: "gemini-3-flash-preview",
           studentName: user.displayName,
           videoUrl: finalVideoUrl,
-          studentUid: user.uid
+          studentUid: user.uid,
+          storagePath,
+          videoMimeType: videoMimeType || videoFile?.type || 'video/mp4'
         }));
       });
 
